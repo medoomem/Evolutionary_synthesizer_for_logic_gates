@@ -6,20 +6,16 @@
 #include <stdbool.h>
 
 /* --- Configuration & Constants --- */
-#define MAX_INPUTS 16
+#define MAX_INPUTS 6           // Upgraded to allow up to 6 inputs (64 rows)
 #define MAX_OUTPUTS 16
-#define MAX_GATES 200        // Capacity for storage
+#define MAX_GATES 300          // Increased capacity
 #define MAX_WIRES (MAX_INPUTS + MAX_GATES)
 
 // --- TUNING PARAMETERS ---
-#define STALL_LIMIT 50000             // If score doesn't improve, grow circuit.
-#define MAX_SOLVE_GATES 200            // Max size to grow to.
-
-// The "Kick": Scramble circuit if size hasn't dropped in this many gens
-#define OPTIMIZATION_PLATEAU_LIMIT 100000 
-
-// The "Hard Stop": If the BEST size hasn't changed in this many gens, finish.
-#define TERMINATION_PLATEAU 4000000    
+#define STALL_LIMIT 75000              
+#define MAX_SOLVE_GATES 200            
+#define OPTIMIZATION_PLATEAU_LIMIT 150000 
+#define TERMINATION_PLATEAU 5000000    
 
 // Op Codes
 #define OP_AND 0
@@ -28,31 +24,49 @@
 #define OP_NOR 3
 #define OP_XOR 4
 #define OP_NOT 5
+#define OP_XNOR 6
+#define NUM_OPS 7
 
-const char* OP_NAMES[] = {"AND", "OR", "NAND", "NOR", "XOR", "NOT"};
+const char* OP_NAMES[] = {"AND", "OR", "NAND", "NOR", "XOR", "NOT", "XNOR"};
 
-/* --- Helpers for Randomness --- */
+/* --- FAST RNG (XorShift64) --- */
+uint64_t rng_state;
+
+void seed_rng(uint64_t seed) {
+    rng_state = seed ? seed : 88172645463325252LL;
+}
+
+// Much faster and better distribution than rand()
+uint64_t fast_rand() {
+    uint64_t x = rng_state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return rng_state = x;
+}
+
+// Helper for range [min, max]
 int randint(int min, int max) {
     if (max < min) return min;
-    return min + rand() % (max - min + 1);
+    return min + (fast_rand() % (max - min + 1));
 }
 
 double rand_double() {
-    return (double)rand() / (double)((long)RAND_MAX + 1);
+    return (double)fast_rand() / (double)UINT64_MAX;
 }
 
 /* --- Structures --- */
 
 typedef struct {
-    int op;
-    int src_a;
-    int src_b;
+    uint8_t op;       // Small optimization: uint8_t for op codes
+    int16_t src_a;    // Small optimization: int16_t for wire indices
+    int16_t src_b;
 } Gate;
 
 typedef struct {
     int num_inputs;
     int num_outputs;
-    int allowed_ops[6];
+    int allowed_ops[NUM_OPS];
     int allowed_ops_count;
     Gate gates[MAX_GATES];
     int num_gates;
@@ -60,26 +74,28 @@ typedef struct {
 } Circuit;
 
 typedef struct {
-    uint16_t inputs_bin[MAX_INPUTS]; 
-    uint16_t targets_bin[MAX_OUTPUTS];
-    uint16_t masks_bin[MAX_OUTPUTS];
+    uint64_t inputs_bin[MAX_INPUTS]; // UPGRADE: 64-bit for up to 6 inputs
+    uint64_t targets_bin[MAX_OUTPUTS];
+    uint64_t masks_bin[MAX_OUTPUTS];
     int num_inputs;
     int num_outputs;
     int max_score;
-    int allowed_ops[6];
+    int allowed_ops[NUM_OPS];
     int allowed_ops_count;
 } GrowthSolver;
 
 /* --- Core Logic --- */
 
-uint16_t run_gate(int op_id, uint16_t val_a, uint16_t val_b) {
+// UPGRADE: 64-bit logic evaluation
+uint64_t run_gate(int op_id, uint64_t val_a, uint64_t val_b) {
     switch (op_id) {
-        case 0: return val_a & val_b;
-        case 1: return val_a | val_b;
-        case 2: return ~(val_a & val_b) & 0xFFFF;
-        case 3: return ~(val_a | val_b) & 0xFFFF;
-        case 4: return val_a ^ val_b;
-        case 5: return (~val_a) & 0xFFFF;
+        case 0: return val_a & val_b;           // AND
+        case 1: return val_a | val_b;           // OR
+        case 2: return ~(val_a & val_b);        // NAND (Implicit 64-bit mask)
+        case 3: return ~(val_a | val_b);        // NOR
+        case 4: return val_a ^ val_b;           // XOR
+        case 5: return ~val_a;                  // NOT
+        case 6: return ~(val_a ^ val_b);        // XNOR
     }
     return 0;
 }
@@ -106,17 +122,20 @@ int circuit_add_random_gate(Circuit *c) {
     return circuit_num_wires(c) - 1;
 }
 
-void circuit_evaluate(Circuit *c, uint16_t *packed_inputs, uint16_t *results) {
-    uint16_t wires[MAX_WIRES];
+void circuit_evaluate(Circuit *c, uint64_t *packed_inputs, uint64_t *results) {
+    uint64_t wires[MAX_WIRES];
+    
+    // Unroll input loading slightly for speed (compiler usually handles this)
     for (int i = 0; i < c->num_inputs; i++) wires[i] = packed_inputs[i];
 
     int wire_ptr = c->num_inputs;
     for (int i = 0; i < c->num_gates; i++) {
         Gate *g = &c->gates[i];
-        uint16_t val_a = wires[g->src_a];
-        uint16_t val_b = (g->op != 5) ? wires[g->src_b] : 0;
+        uint64_t val_a = wires[g->src_a];
+        uint64_t val_b = (g->op != 5) ? wires[g->src_b] : 0;
         wires[wire_ptr++] = run_gate(g->op, val_a, val_b);
     }
+    
     for (int i = 0; i < c->num_outputs; i++) results[i] = wires[c->output_map[i]];
 }
 
@@ -125,6 +144,7 @@ int circuit_get_active_indices(Circuit *c, int *active_indices) {
     for (int i = 0; i < c->num_outputs; i++) used_wire[c->output_map[i]] = true;
 
     int count = 0;
+    // Walk backwards from last gate to first
     for (int i = c->num_gates - 1; i >= 0; i--) {
         int wire_idx = c->num_inputs + i;
         if (used_wire[wire_idx]) {
@@ -133,6 +153,7 @@ int circuit_get_active_indices(Circuit *c, int *active_indices) {
             if (g->op != 5) used_wire[g->src_b] = true;
         }
     }
+    // Collect forward
     for (int i = 0; i < c->num_gates; i++) {
         int wire_idx = c->num_inputs + i;
         if (used_wire[wire_idx]) active_indices[count++] = i;
@@ -197,31 +218,37 @@ void circuit_mutate(Circuit *c) {
 
 /* --- Solver --- */
 
-int count_set_bits(uint16_t n) {
-    int count = 0;
-    while (n > 0) { n &= (n - 1); count++; }
-    return count;
+// UPGRADE: Use hardware population count
+int count_set_bits(uint64_t n) {
+    #ifdef __GNUC__
+        return __builtin_popcountll(n);
+    #else
+        // Fallback for non-GCC compilers
+        int count = 0;
+        while (n > 0) { n &= (n - 1); count++; }
+        return count;
+    #endif
 }
 
 void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_str) {
     s->allowed_ops_count = 0;
     if (strcmp(allowed_gates_str, "ALL") == 0) {
-        for(int i=0; i<6; i++) s->allowed_ops[i] = i;
-        s->allowed_ops_count = 6;
+        for(int i=0; i<NUM_OPS; i++) s->allowed_ops[i] = i; 
+        s->allowed_ops_count = NUM_OPS;
     } else {
         char buf[256];
         strncpy(buf, allowed_gates_str, 255);
         char *token = strtok(buf, " ");
         while(token) {
-            for(int i=0; i<6; i++) {
+            for(int i=0; i<NUM_OPS; i++) {
                 if (strcmp(token, OP_NAMES[i]) == 0) s->allowed_ops[s->allowed_ops_count++] = i;
             }
             token = strtok(NULL, " ");
         }
     }
 
-    char tt_copy[1024];
-    strncpy(tt_copy, tt_str, 1023);
+    char tt_copy[2048]; // Increased buffer
+    strncpy(tt_copy, tt_str, 2047);
     char *saveptr;
     char *row_str = strtok_r(tt_copy, " ", &saveptr);
     
@@ -233,6 +260,7 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
     s->num_inputs = 0;
     s->num_outputs = 0;
 
+    // Detect dimensions from first row
     if (row_str) {
         char *colon = strchr(row_str, ':');
         if (colon) {
@@ -240,8 +268,14 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
             s->num_outputs = strlen(colon + 1);
         }
     }
+    
+    if (s->num_inputs > MAX_INPUTS) {
+        printf("Error: Input count (%d) exceeds MAX_INPUTS (%d)\n", s->num_inputs, MAX_INPUTS);
+        exit(1);
+    }
 
-    strncpy(tt_copy, tt_str, 1023);
+    // Re-parse
+    strncpy(tt_copy, tt_str, 2047);
     row_str = strtok_r(tt_copy, " ", &saveptr);
 
     while (row_str) {
@@ -250,13 +284,17 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
             *colon = '\0';
             char *lhs = row_str;
             char *rhs = colon + 1;
-            for (int i = 0; i < s->num_inputs; i++) {
-                if (lhs[i] == '1') s->inputs_bin[i] |= (1 << r_idx);
-            }
-            for (int i = 0; i < s->num_outputs; i++) {
-                if (rhs[i] != 'X') {
-                    s->masks_bin[i] |= (1 << r_idx);
-                    if (rhs[i] == '1') s->targets_bin[i] |= (1 << r_idx);
+            
+            // Limit to 64 rows
+            if (r_idx < 64) {
+                for (int i = 0; i < s->num_inputs; i++) {
+                    if (lhs[i] == '1') s->inputs_bin[i] |= (1ULL << r_idx);
+                }
+                for (int i = 0; i < s->num_outputs; i++) {
+                    if (rhs[i] != 'X') {
+                        s->masks_bin[i] |= (1ULL << r_idx);
+                        if (rhs[i] == '1') s->targets_bin[i] |= (1ULL << r_idx);
+                    }
                 }
             }
             r_idx++;
@@ -269,11 +307,11 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
 }
 
 int solver_score(GrowthSolver *s, Circuit *c) {
-    uint16_t outputs[MAX_OUTPUTS];
+    uint64_t outputs[MAX_OUTPUTS];
     circuit_evaluate(c, s->inputs_bin, outputs);
     int total = 0;
     for (int i = 0; i < s->num_outputs; i++) {
-        uint16_t matches = ~(outputs[i] ^ s->targets_bin[i]) & s->masks_bin[i];
+        uint64_t matches = ~(outputs[i] ^ s->targets_bin[i]) & s->masks_bin[i];
         total += count_set_bits(matches);
     }
     return total;
@@ -315,11 +353,10 @@ void solver_try_remove_gate(GrowthSolver *s, Circuit *c) {
     circuit_compact(c);
 }
 
-// Returns true if solved, solution in 'result'
 bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *result) {
     printf("Problem: %d inputs -> %d outputs\n", s->num_inputs, s->num_outputs);
     printf("Target bits: %d\n", s->max_score);
-    printf("Strategy: Deep Opt with Termination Plateau\n\n");
+    printf("Strategy: Deep Opt with Termination Plateau (64-bit Engine)\n\n");
 
     Circuit parent;
     parent.num_inputs = s->num_inputs;
@@ -334,10 +371,9 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
     int parent_score = solver_score(s, &parent);
     int best_score_at_size = parent_score;
     
-    // Counters
-    int gens_since_improvement = 0;        // For stalling (growth)
-    int gens_since_kick_trigger = 0;       // For kicking (local min escape)
-    int gens_since_absolute_best = 0;      // For final termination
+    int gens_since_improvement = 0;        
+    int gens_since_kick_trigger = 0;       
+    int gens_since_absolute_best = 0;      
 
     int gen = 0;
     int best_active = 999;
@@ -349,13 +385,11 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
         gens_since_kick_trigger++;
         gens_since_absolute_best++;
 
-        // 1. Mutate
         Circuit child = parent;
         int num_muts = (rand_double() < 0.8) ? 1 : randint(2, 3);
         for (int i = 0; i < num_muts; i++) circuit_mutate(&child);
         int child_score = solver_score(s, &child);
 
-        // 2. Select
         if (child_score >= parent_score) {
             if (child_score > parent_score) {
                 gens_since_improvement = 0;
@@ -365,56 +399,46 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
             parent_score = child_score;
         }
 
-        // 3. Check Solution
         if (parent_score == s->max_score) {
             Circuit temp_check = parent;
             circuit_compact(&temp_check); 
             int active = temp_check.num_gates;
 
-            // Found a BETTER global best?
             if (active < best_active) {
                 best_active = active;
-                *result = temp_check; // Store best
+                *result = temp_check;
                 found_solution = true;
                 
-                // RESET Kick and Termination counters
                 gens_since_kick_trigger = 0;
                 gens_since_absolute_best = 0;
                 
                 printf("Gen %d: NEW BEST! %d gates.\n", gen, active);
-
-                // Prune
                 solver_try_remove_gate(s, result);
                 int pruned_active = circuit_count_active(result);
                 
                 if (pruned_active < best_active) {
                      best_active = pruned_active;
-                     printf("  -> Pruned down to: %d gates\n", best_active);
+                     // printf("  -> Pruned down to: %d gates\n", best_active);
                 }
                 
-                // Adopt optimized
                 parent = *result; 
                 parent.num_gates = pruned_active;
             }
         }
 
-        // 4. Kick Mechanism (Optimization Plateau)
         if (found_solution && gens_since_kick_trigger > OPTIMIZATION_PLATEAU_LIMIT) {
-            printf("Gen %d: Stuck at %d gates (Kicking...)\n", gen, best_active);
+            // printf("Gen %d: stuck at %d gates (Randomizing for better convergence...)\n", gen, best_active);
             for(int k=0; k<5; k++) circuit_mutate(&parent);
             parent_score = solver_score(s, &parent);
             gens_since_kick_trigger = 0;
-            // Does NOT reset gens_since_absolute_best
         }
 
-        // 5. Termination Plateau (Final Stop)
         if (found_solution && gens_since_absolute_best > TERMINATION_PLATEAU) {
-            printf("\n*** TERMINATION PLATEAU REACHED ***\n");
-            printf("Best solution (%d gates) hasn't improved for %d generations.\n", best_active, TERMINATION_PLATEAU);
+            printf("\n*** CONVERGED ***\n");
+            printf("Best solution (%d gates) hasn't improved for %d generations so we stop now.\n", best_active, TERMINATION_PLATEAU);
             return true;
         }
 
-        // 6. Stall Growth
         if (gens_since_improvement > stall_limit) {
             if (parent.num_gates < max_gates) {
                 int new_wire = circuit_add_random_gate(&parent);
@@ -425,15 +449,14 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
                 parent_score = solver_score(s, &parent);
                 best_score_at_size = parent_score;
                 gens_since_improvement = 0;
-                printf("Gen %d: Stalled. Growing to %d gates.\n", gen, parent.num_gates);
+                // printf("Gen %d: stalling. adding gates now its %d gates.\n", gen, parent.num_gates);
             } else {
-                // At max size, trigger kick faster
                 gens_since_kick_trigger = OPTIMIZATION_PLATEAU_LIMIT + 1;
             }
         }
 
         if (gen % 50000 == 0) {
-             printf("Gen %d: Gates: %d, Score: %d/%d, Best Sol: %s%d\n", 
+             printf("Gen %d: GateNum: %d, Score: %d/%d, Activated Gates: %s%d\n", 
                    gen, parent.num_gates, parent_score, s->max_score, 
                    found_solution ? "" : "None yet", best_active == 999 ? 0 : best_active);
         }
@@ -441,8 +464,6 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
 
     return found_solution;
 }
-
-/* --- Render --- */
 
 void get_source_name(int idx, int num_inputs, Circuit *c, char *buffer) {
     if (idx < num_inputs) {
@@ -503,7 +524,7 @@ void render_circuit(Circuit *c, GrowthSolver *s) {
 }
 
 int main() {
-    srand(time(NULL));
+    seed_rng(time(NULL));
 
     // input truth table separated by spaces i.e. "00:0 01:1 10:1 11:0"
     const char *tt = 
@@ -512,8 +533,8 @@ int main() {
         "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
         "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX";
 
+    // Separated by space you can specify allowed gates to be used "ALL" or "NOR XOR OR XNOR NAND AND NOT" or any combination of allowing.
     GrowthSolver solver;
-    // usecase ALL for using all gates XOR NOT etc... and "XOR NOR" for example separated by space to use XOR and NOR only
     solver_init(&solver, tt, "ALL");
 
     Circuit solution;
