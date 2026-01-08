@@ -8,7 +8,7 @@ Unlike standard solvers that simply find *a* solution, this engine employs a **C
 
 *   **Zero Dependencies:** Written in standard C (`stdlib`, `stdio`, `string`, `time`).
 *   **Arbitrary Truth Tables:** Solves for any number of inputs and outputs (configured via string).
-*   **Gate Set Control:** Restrict the solver to specific logic families (e.g., "NAND ONLY", "XOR AND", or "ALL").
+*   **Gate Set Control:** Restrict the solver to specific logic families (e.g., "NAND" Only, "XOR AND", or "ALL").
 *   **Smart Optimization Strategy:**
     *   **Continuous Growth:** Adds complexity only when the algorithm stalls.
     *   **Aggressive Pruning:** Immediately attempts to remove redundant gates once a solution is found.
@@ -29,7 +29,7 @@ gcc -O3 solver.c -o solver
 
 ### Running
 ```bash
-./solver
+./solver.c
 ```
 
 ## ⚙️ Configuration
@@ -50,7 +50,7 @@ const char *tt = "00:00 01:10 10:10 11:01";
 ### 2. restricting Gate Types
 In `main()`, pass the allowed gates to `solver_init`:
 ```c
-// Use all standard gates (AND, OR, NAND, NOR, XOR, NOT)
+// Use all standard gates (AND, OR, NAND, NOR, XOR, XNOR, NOT)
 solver_init(&solver, tt, "ALL");
 
 // OR: Restrict to specific gates
@@ -78,17 +78,6 @@ Adjust the macros at the top of the file to change solver behavior:
 ## 📊 Sample Output
 
 ```text
-Problem: 4 inputs -> 7 outputs
-Target bits: 49
-Strategy: Deep Opt with Termination Plateau
-
-...
-Gen 125000: NEW BEST! 13 gates.
-  -> Pruned down to: 13 gates
-...
-*** TERMINATION PLATEAU REACHED ***
-Best solution (13 gates) hasn't improved for 4000000 generations.
-
 ============================================================
  NETLIST: 13 GATES
 ============================================================
