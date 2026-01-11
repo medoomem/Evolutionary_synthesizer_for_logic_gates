@@ -10,6 +10,7 @@
 #define MAX_OUTPUTS 16
 #define MAX_GATES 300          // Increased capacity
 #define MAX_WIRES (MAX_INPUTS + MAX_GATES)
+// pls set MAX_CHUNKS to: (2^MAX_INPUTS)/64
 #define MAX_CHUNKS 16          // 1024 bits / 64 bits per chunk = 16 chunks
 
 // --- TUNING PARAMETERS ---
