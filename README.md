@@ -62,7 +62,7 @@ Adjust the macros at the top of the file to change solver behavior:
 
 | Macro | Default | Description |
 | :--- | :--- | :--- |
-| `MAX_SOLVE_GATES` | `200` | The hard limit on circuit size. |
+| `MAX_SOLVE_GATES` | `300` | The hard limit on circuit size. |
 | `STALL_LIMIT` | `75000` | If the score (accuracy) doesn't improve, add a new gate. |
 | `OPTIMIZATION_PLATEAU_LIMIT` | `150000` | If the *size* of the solution doesn't drop, apply a "Kick" (random mutation). |
 | `TERMINATION_PLATEAU` | `5000000` | If the *best* size found hasn't changed for this long, stop and print results. |
