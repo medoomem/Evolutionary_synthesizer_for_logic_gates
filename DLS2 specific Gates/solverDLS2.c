@@ -1049,237 +1049,460 @@ bool is_gate_available(int op) {
     return (op >= 0 && op < NUM_OPS && DLS2_PIN_MAP[op].loaded);
 }
 
-/* --- Wire Helper --- */
-static void write_wire(FILE *f, int src_pin_id, int src_owner_id,
-                       int tgt_pin_id, int tgt_owner_id, bool is_last) {
+/* ============================================================
+ * DLS2 LAYOUT CONFIGURATION
+ * Adjust these values to customize the chip appearance
+ * ============================================================ */
+typedef struct {
+    // === COORDINATE BOUNDS ===
+    float y_min;                // Bottom Y bound
+    float y_max;                // Top Y bound
+    float input_x;              // X position of input pins
+    float output_x;             // X position of output pins
+    float gate_x_min;           // Leftmost gate X position
+    float gate_x_max;           // Rightmost gate X position
+
+    // === SPACING ===
+    float min_gate_h_spacing;   // Minimum horizontal space between depth columns
+    float min_gate_v_spacing;   // Minimum vertical space between gates
+    float input_v_spacing;      // Vertical spacing between input pins
+    float output_v_spacing;     // Vertical spacing between output pins
+
+    // === WIRE ROUTING ===
+    float wire_spread;          // How much to spread parallel wires
+    float wire_offset_base;     // Base offset for wire waypoints
+
+    // === VISUAL FLOW ===
+    float depth_y_drift;        // Downward drift per depth level (cascade effect)
+    bool center_single_gates;   // Center gates that are alone at their depth
+
+    // === CHIP APPEARANCE ===
+    float chip_color_r;
+    float chip_color_g;
+    float chip_color_b;
+} LayoutConfig;
+
+// Default configuration - spread out and clear
+static LayoutConfig get_default_layout_config(void) {
+    LayoutConfig cfg = {
+        // Bounds - generous space
+        .y_min = -5.0f,
+        .y_max = 5.0f,
+        .input_x = -9.0f,
+        .output_x = 9.0f,
+        .gate_x_min = -6.0f,
+        .gate_x_max = 6.0f,
+
+        // Spacing - room to breathe
+        .min_gate_h_spacing = 2.0f,
+        .min_gate_v_spacing = 1.5f,
+        .input_v_spacing = 1.0f,
+        .output_v_spacing = 1.0f,
+
+        // Wire routing
+        .wire_spread = 0.15f,
+        .wire_offset_base = 0.5f,
+
+        // Visual flow
+        .depth_y_drift = 0.2f,
+        .center_single_gates = true,
+
+        // Chip color (blue-ish)
+        .chip_color_r = 0.25f,
+        .chip_color_g = 0.45f,
+        .chip_color_b = 0.70f
+    };
+    return cfg;
+}
+
+/* ============================================================
+ * LAYOUT HELPERS
+ * ============================================================ */
+
+static void calculate_gate_depths(Circuit *c, int *depths) {
+    for (int i = 0; i < c->num_gates; i++) {
+        depths[i] = 0;
+        Gate *g = &c->gates[i];
+
+        if (g->src_a >= c->num_inputs) {
+            int d = depths[g->src_a - c->num_inputs] + 1;
+            if (d > depths[i]) depths[i] = d;
+        }
+        if (g->op != OP_NOT && g->src_b >= c->num_inputs) {
+            int d = depths[g->src_b - c->num_inputs] + 1;
+            if (d > depths[i]) depths[i] = d;
+        }
+    }
+}
+
+static int get_max_depth(int *depths, int num_gates) {
+    int max_d = 0;
+    for (int i = 0; i < num_gates; i++) {
+        if (depths[i] > max_d) max_d = depths[i];
+    }
+    return max_d;
+}
+
+static float absf(float x) { return (x < 0) ? -x : x; }
+static float minf(float a, float b) { return (a < b) ? a : b; }
+static float maxf(float a, float b) { return (a > b) ? a : b; }
+
+/* ============================================================
+ * WIRE ROUTING WITH CHANNELS
+ * ============================================================ */
+static void write_wire_routed(FILE *f,
+                              int src_pin, int src_owner,
+                              int tgt_pin, int tgt_owner,
+                              float src_x, float src_y,
+                              float tgt_x, float tgt_y,
+                              int wire_index,      // For offset calculation
+                              LayoutConfig *cfg,
+                              bool is_last) {
     fprintf(f, "    {\n");
-    fprintf(f, "      \"SourcePinAddress\":{\n");
-    fprintf(f, "        \"PinID\":%d,\n", src_pin_id);
-    fprintf(f, "        \"PinOwnerID\":%d\n", src_owner_id);
-    fprintf(f, "      },\n");
-    fprintf(f, "      \"TargetPinAddress\":{\n");
-    fprintf(f, "        \"PinID\":%d,\n", tgt_pin_id);
-    fprintf(f, "        \"PinOwnerID\":%d\n", tgt_owner_id);
-    fprintf(f, "      },\n");
+    fprintf(f, "      \"SourcePinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", src_pin, src_owner);
+    fprintf(f, "      \"TargetPinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", tgt_pin, tgt_owner);
     fprintf(f, "      \"ConnectionType\":0,\n");
     fprintf(f, "      \"ConnectedWireIndex\":-1,\n");
     fprintf(f, "      \"ConnectedWireSegmentIndex\":-1,\n");
-    fprintf(f, "      \"Points\":[{\"x\":0.0,\"y\":0.0},{\"x\":0.0,\"y\":0.0}]\n");
+
+    float dx = tgt_x - src_x;
+    float dy = tgt_y - src_y;
+
+    // Direct connection for very close or nearly horizontal wires
+    if (absf(dy) < 0.4f && dx < 2.0f) {
+        fprintf(f, "      \"Points\":[{\"x\":0.0,\"y\":0.0},{\"x\":0.0,\"y\":0.0}]\n");
+    } else {
+        // Calculate wire channel offset to prevent overlap
+        float channel_offset = cfg->wire_offset_base + (wire_index % 5) * cfg->wire_spread;
+
+        // Alternate direction of offset based on wire index
+        if (wire_index % 2 == 1) channel_offset = -channel_offset;
+
+        // L-shaped routing through channel
+        float mid_x = src_x + dx * 0.5f + channel_offset;
+
+        fprintf(f, "      \"Points\":[");
+        fprintf(f, "{\"x\":0.0,\"y\":0.0},");
+        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", mid_x, src_y);
+        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", mid_x, tgt_y);
+        fprintf(f, "{\"x\":0.0,\"y\":0.0}]\n");
+    }
+
     fprintf(f, "    }%s\n", is_last ? "" : ",");
-                       }
+}
 
-                       /* --- Main Export Function --- */
-                       void render_dls2_json(Circuit *c, GrowthSolver *s) {
-                           // Check all gates in circuit have loaded pin mappings
-                           for (int i = 0; i < c->num_gates; i++) {
-                               int op = c->gates[i].op;
-                               if (!DLS2_PIN_MAP[op].loaded) {
-                                   printf("Error: Gate type %s (gate #%d) has no pin mapping!\n",
-                                          OP_NAMES[op], i);
-                                   printf("Make sure %s exists in the current directory.\n",
-                                          GATE_FILENAMES[op]);
-                                   return;
-                               }
-                           }
+/* ============================================================
+ * MAIN EXPORT FUNCTION
+ * ============================================================ */
+void render_dls2_json(Circuit *c, GrowthSolver *s) {
+    // Get layout configuration
+    LayoutConfig cfg = get_default_layout_config();
 
-                           // Build filename from chip name
-                           char filename[256];
-                           snprintf(filename, sizeof(filename), "%s.json", DLS2_CHIP_NAME);
+    // Validate pin mappings
+    for (int i = 0; i < c->num_gates; i++) {
+        if (!DLS2_PIN_MAP[c->gates[i].op].loaded) {
+            printf("Error: Gate %s (#%d) has no pin mapping!\n",
+                   OP_NAMES[c->gates[i].op], i);
+            return;
+        }
+    }
 
-                           FILE *f = fopen(filename, "w");
-                           if (!f) {
-                               printf("Error: Could not open file %s for writing\n", filename);
-                               return;
-                           }
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s.json", DLS2_CHIP_NAME);
 
-                           // --- ID Allocation ---
-                           int input_ids[MAX_INPUTS];
-                           int output_ids[MAX_OUTPUTS];
-                           int gate_ids[MAX_GATES];
+    FILE *f = fopen(filename, "w");
+    if (!f) {
+        printf("Error: Cannot open %s\n", filename);
+        return;
+    }
 
-                           for (int i = 0; i < c->num_inputs; i++)  input_ids[i]  = 1000 + i;
-                           for (int i = 0; i < c->num_outputs; i++) output_ids[i] = 2000 + i;
-                           for (int i = 0; i < c->num_gates; i++)   gate_ids[i]   = 3000 + i;
+    // === CALCULATE DEPTHS ===
+    int depths[MAX_GATES];
+    calculate_gate_depths(c, depths);
+    int max_depth = get_max_depth(depths, c->num_gates);
 
-                           // --- Dynamic Chip Size ---
-                           int max_pins = (c->num_inputs > c->num_outputs) ? c->num_inputs : c->num_outputs;
-                           float chip_height = DLS2_BASE_HEIGHT;
-                           if (max_pins > 2) {
-                               chip_height = DLS2_BASE_HEIGHT + (max_pins - 2) * DLS2_HEIGHT_MULTIPLIER;
-                           }
-                           float chip_width = 0.725f;
-                           if (c->num_gates > 10) {
-                               chip_width = 0.725f + (c->num_gates - 10) * 0.04f;
-                               if (chip_width > 1.8f) chip_width = 1.8f;
-                           }
+    // === ALLOCATE IDs ===
+    int input_ids[MAX_INPUTS];
+    int output_ids[MAX_OUTPUTS];
+    int gate_ids[MAX_GATES];
 
-                           // --- Layout Parameters ---
-                           const float INPUT_X = -8.0f;
-                           const float OUTPUT_X = 8.0f;
-                           const float GATE_START_X = -4.0f;
-                           const float GATE_START_Y = 2.0f;
-                           const float GRID_SPACING_X = 2.0f;
-                           const float GRID_SPACING_Y = 1.5f;
-                           const int GATES_PER_ROW = 5;
+    for (int i = 0; i < c->num_inputs; i++)  input_ids[i]  = 1000 + i;
+    for (int i = 0; i < c->num_outputs; i++) output_ids[i] = 2000 + i;
+    for (int i = 0; i < c->num_gates; i++)   gate_ids[i]   = 3000 + i;
 
-                           // --- JSON Header ---
-                           fprintf(f, "{\n");
-                           fprintf(f, "  \"DLSVersion\": \"2.1.6\",\n");
-                           fprintf(f, "  \"Name\": \"%s\",\n", DLS2_CHIP_NAME);
-                           fprintf(f, "  \"NameLocation\": 0,\n");
-                           fprintf(f, "  \"ChipType\": 0,\n");
-                           fprintf(f, "  \"Size\": {\n");
-                           fprintf(f, "    \"x\": %.3f,\n", chip_width);
-                           fprintf(f, "    \"y\": %.3f\n", chip_height);
-                           fprintf(f, "  },\n");
-                           fprintf(f, "  \"Colour\": {\n");
-                           fprintf(f, "    \"r\": 0.3,\n");
-                           fprintf(f, "    \"g\": 0.5,\n");
-                           fprintf(f, "    \"b\": 0.7,\n");
-                           fprintf(f, "    \"a\": 1\n");
-                           fprintf(f, "  },\n");
+    // === INPUT POSITIONS ===
+    float input_y[MAX_INPUTS];
+    float total_input_height = (c->num_inputs - 1) * cfg.input_v_spacing;
+    float input_start_y = total_input_height / 2.0f;
 
-                           // --- InputPins (evenly spaced) ---
-                           fprintf(f, "  \"InputPins\":[\n");
-                           float input_spacing = (c->num_inputs > 1) ? (chip_height * 4.0f) / (c->num_inputs - 1) : 0;
-                           float input_start_y = (c->num_inputs > 1) ? chip_height * 2.0f : 0;
-                           for (int i = 0; i < c->num_inputs; i++) {
-                               float y_pos = input_start_y - i * input_spacing;
-                               fprintf(f, "    {\n");
-                               fprintf(f, "      \"Name\":\"IN%d\",\n", i);
-                               fprintf(f, "      \"ID\":%d,\n", input_ids[i]);
-                               fprintf(f, "      \"Position\":{\n");
-                               fprintf(f, "        \"x\":%.5f,\n", INPUT_X);
-                               fprintf(f, "        \"y\":%.5f\n", y_pos);
-                               fprintf(f, "      },\n");
-                               fprintf(f, "      \"BitCount\":1,\n");
-                               fprintf(f, "      \"Colour\":0,\n");
-                               fprintf(f, "      \"ValueDisplayMode\":0\n");
-                               fprintf(f, "    }%s\n", (i < c->num_inputs - 1) ? "," : "");
-                           }
-                           fprintf(f, "  ],\n");
+    for (int i = 0; i < c->num_inputs; i++) {
+        input_y[i] = input_start_y - i * cfg.input_v_spacing;
+    }
 
-                           // --- OutputPins (evenly spaced) ---
-                           fprintf(f, "  \"OutputPins\":[\n");
-                           float output_spacing = (c->num_outputs > 1) ? (chip_height * 4.0f) / (c->num_outputs - 1) : 0;
-                           float output_start_y = (c->num_outputs > 1) ? chip_height * 2.0f : 0;
-                           for (int i = 0; i < c->num_outputs; i++) {
-                               float y_pos = output_start_y - i * output_spacing;
-                               fprintf(f, "    {\n");
-                               fprintf(f, "      \"Name\":\"OUT%d\",\n", i);
-                               fprintf(f, "      \"ID\":%d,\n", output_ids[i]);
-                               fprintf(f, "      \"Position\":{\n");
-                               fprintf(f, "        \"x\":%.5f,\n", OUTPUT_X);
-                               fprintf(f, "        \"y\":%.5f\n", y_pos);
-                               fprintf(f, "      },\n");
-                               fprintf(f, "      \"BitCount\":1,\n");
-                               fprintf(f, "      \"Colour\":0,\n");
-                               fprintf(f, "      \"ValueDisplayMode\":0\n");
-                               fprintf(f, "    }%s\n", (i < c->num_outputs - 1) ? "," : "");
-                           }
-                           fprintf(f, "  ],\n");
+    // === COUNT GATES PER DEPTH ===
+    int count_at_depth[100] = {0};
+    int idx_at_depth[MAX_GATES];
 
-                           // --- SubChips (Gates) ---
-                           fprintf(f, "  \"SubChips\":[\n");
-                           for (int i = 0; i < c->num_gates; i++) {
-                               Gate *g = &c->gates[i];
-                               int row = i / GATES_PER_ROW;
-                               int col = i % GATES_PER_ROW;
-                               float x_pos = GATE_START_X + col * GRID_SPACING_X;
-                               float y_pos = GATE_START_Y - row * GRID_SPACING_Y;
+    for (int i = 0; i < c->num_gates; i++) {
+        idx_at_depth[i] = count_at_depth[depths[i]];
+        count_at_depth[depths[i]]++;
+    }
 
-                               fprintf(f, "    {\n");
-                               fprintf(f, "      \"Name\":\"%s\",\n", OP_NAMES[g->op]);
-                               fprintf(f, "      \"ID\":%d,\n", gate_ids[i]);
-                               fprintf(f, "      \"Label\":\"\",\n");
-                               fprintf(f, "      \"Position\":{\n");
-                               fprintf(f, "        \"x\":%.5f,\n", x_pos);
-                               fprintf(f, "        \"y\":%.5f\n", y_pos);
-                               fprintf(f, "      },\n");
-                               fprintf(f, "      \"OutputPinColourInfo\":[{\"PinColour\":0,\"PinID\":%d}],\n",
-                                       DLS2_PIN_MAP[g->op].output);
-                               fprintf(f, "      \"InternalData\":null\n");
-                               fprintf(f, "    }%s\n", (i < c->num_gates - 1) ? "," : "");
-                           }
-                           fprintf(f, "  ],\n");
+    // Find max gates at any single depth (for spacing calculation)
+    int max_gates_at_depth = 0;
+    for (int d = 0; d <= max_depth; d++) {
+        if (count_at_depth[d] > max_gates_at_depth) {
+            max_gates_at_depth = count_at_depth[d];
+        }
+    }
 
-                           // --- Count Wires ---
-                           int total_wires = 0;
-                           for (int i = 0; i < c->num_gates; i++) {
-                               total_wires++;
-                               if (c->gates[i].op != OP_NOT) total_wires++;
-                           }
-                           total_wires += c->num_outputs;
+    // === GATE POSITIONS ===
+    float gate_x[MAX_GATES];
+    float gate_y[MAX_GATES];
 
-                           // --- Wires ---
-                           fprintf(f, "  \"Wires\":[\n");
-                           int wire_idx = 0;
+    // Calculate horizontal spacing
+    float h_spacing = cfg.min_gate_h_spacing;
+    if (max_depth > 0) {
+        float available_width = cfg.gate_x_max - cfg.gate_x_min;
+        float needed_spacing = available_width / (max_depth + 1);
+        h_spacing = maxf(cfg.min_gate_h_spacing, needed_spacing);
+    }
 
-                           for (int i = 0; i < c->num_gates; i++) {
-                               Gate *g = &c->gates[i];
+    // Position gates
+    for (int i = 0; i < c->num_gates; i++) {
+        Gate *g = &c->gates[i];
+        int d = depths[i];
+        int idx = idx_at_depth[i];
+        int count = count_at_depth[d];
 
-                               // Wire for src_a
-                               int src_wire_a = g->src_a;
-                               int src_pin_a, src_owner_a;
-                               if (src_wire_a < c->num_inputs) {
-                                   src_pin_a = 0;
-                                   src_owner_a = input_ids[src_wire_a];
-                               } else {
-                                   int idx = src_wire_a - c->num_inputs;
-                                   src_pin_a = DLS2_PIN_MAP[c->gates[idx].op].output;
-                                   src_owner_a = gate_ids[idx];
-                               }
-                               wire_idx++;
-                               write_wire(f, src_pin_a, src_owner_a,
-                                          DLS2_PIN_MAP[g->op].input_a, gate_ids[i],
-                                          wire_idx == total_wires);
+        // === X POSITION: Based on depth ===
+        gate_x[i] = cfg.gate_x_min + (d + 0.5f) * h_spacing;
 
-                               // Wire for src_b (skip for NOT)
-                               if (g->op != OP_NOT) {
-                                   int src_wire_b = g->src_b;
-                                   int src_pin_b, src_owner_b;
-                                   if (src_wire_b < c->num_inputs) {
-                                       src_pin_b = 0;
-                                       src_owner_b = input_ids[src_wire_b];
-                                   } else {
-                                       int idx = src_wire_b - c->num_inputs;
-                                       src_pin_b = DLS2_PIN_MAP[c->gates[idx].op].output;
-                                       src_owner_b = gate_ids[idx];
-                                   }
-                                   wire_idx++;
-                                   write_wire(f, src_pin_b, src_owner_b,
-                                              DLS2_PIN_MAP[g->op].input_b, gate_ids[i],
-                                              wire_idx == total_wires);
-                               }
-                           }
+        // === Y POSITION ===
+        if (count == 1 && cfg.center_single_gates) {
+            // Single gate: position based on source average
+            float sum_y = 0.0f;
+            int n = 0;
 
-                           // Wires to outputs
-                           for (int i = 0; i < c->num_outputs; i++) {
-                               int src_wire = c->output_map[i];
-                               int src_pin, src_owner;
-                               if (src_wire < c->num_inputs) {
-                                   src_pin = 0;
-                                   src_owner = input_ids[src_wire];
-                               } else {
-                                   int idx = src_wire - c->num_inputs;
-                                   src_pin = DLS2_PIN_MAP[c->gates[idx].op].output;
-                                   src_owner = gate_ids[idx];
-                               }
-                               wire_idx++;
-                               write_wire(f, src_pin, src_owner, 0, output_ids[i], wire_idx == total_wires);
-                           }
+            if (g->src_a < c->num_inputs) {
+                sum_y += input_y[g->src_a];
+            } else {
+                sum_y += gate_y[g->src_a - c->num_inputs];
+            }
+            n++;
 
-                           fprintf(f, "  ],\n");
-                           fprintf(f, "  \"Displays\": null\n");
-                           fprintf(f, "}\n");
+            if (g->op != OP_NOT) {
+                if (g->src_b < c->num_inputs) {
+                    sum_y += input_y[g->src_b];
+                } else {
+                    sum_y += gate_y[g->src_b - c->num_inputs];
+                }
+                n++;
+            }
 
-                           fclose(f);
-                           printf("Exported to %s (size: %.2f x %.2f, %d gates, %d wires)\n",
-                                  filename, chip_width, chip_height, c->num_gates, total_wires);
-                           // Register chip in project description
-                           update_project_description(DLS2_CHIP_NAME);
-                       }
+            gate_y[i] = sum_y / n;
+        } else {
+            // Multiple gates: spread evenly with good spacing
+            float col_height = (count - 1) * cfg.min_gate_v_spacing;
+            float col_start_y = col_height / 2.0f;
+            gate_y[i] = col_start_y - idx * cfg.min_gate_v_spacing;
+        }
 
+        // Apply depth drift for visual cascade
+        gate_y[i] -= d * cfg.depth_y_drift;
+
+        // Clamp to bounds with margin
+        gate_y[i] = maxf(cfg.y_min + 0.5f, minf(cfg.y_max - 0.5f, gate_y[i]));
+    }
+
+    // === OUTPUT POSITIONS ===
+    float output_y[MAX_OUTPUTS];
+    float total_output_height = (c->num_outputs - 1) * cfg.output_v_spacing;
+    float output_start_y = total_output_height / 2.0f;
+
+    for (int i = 0; i < c->num_outputs; i++) {
+        output_y[i] = output_start_y - i * cfg.output_v_spacing;
+    }
+
+    // === CHIP SIZE ===
+    int max_pins = (c->num_inputs > c->num_outputs) ? c->num_inputs : c->num_outputs;
+
+    float chip_height = 0.5f;
+    if (max_pins > 2) chip_height += (max_pins - 2) * 0.35f;
+    if (max_gates_at_depth > 3) chip_height += (max_gates_at_depth - 3) * 0.2f;
+    chip_height = minf(chip_height, 3.0f);
+
+    float chip_width = 0.725f;
+    if (max_depth > 2) chip_width += (max_depth - 2) * 0.15f;
+    if (c->num_gates > 8) chip_width += (c->num_gates - 8) * 0.03f;
+    chip_width = minf(chip_width, 2.5f);
+
+    // === JSON OUTPUT ===
+    fprintf(f, "{\n");
+    fprintf(f, "  \"DLSVersion\": \"2.1.6\",\n");
+    fprintf(f, "  \"Name\": \"%s\",\n", DLS2_CHIP_NAME);
+    fprintf(f, "  \"NameLocation\": 0,\n");
+    fprintf(f, "  \"ChipType\": 0,\n");
+    fprintf(f, "  \"Size\": {\"x\": %.3f, \"y\": %.3f},\n", chip_width, chip_height);
+    fprintf(f, "  \"Colour\": {\"r\": %.3f, \"g\": %.3f, \"b\": %.3f, \"a\": 1},\n",
+            cfg.chip_color_r, cfg.chip_color_g, cfg.chip_color_b);
+
+    // --- InputPins ---
+    fprintf(f, "  \"InputPins\":[\n");
+    for (int i = 0; i < c->num_inputs; i++) {
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"Name\":\"IN%d\",\n", i);
+        fprintf(f, "      \"ID\":%d,\n", input_ids[i]);
+        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", cfg.input_x, input_y[i]);
+        fprintf(f, "      \"BitCount\":1,\n");
+        fprintf(f, "      \"Colour\":0,\n");
+        fprintf(f, "      \"ValueDisplayMode\":0\n");
+        fprintf(f, "    }%s\n", (i < c->num_inputs - 1) ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // --- OutputPins ---
+    fprintf(f, "  \"OutputPins\":[\n");
+    for (int i = 0; i < c->num_outputs; i++) {
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"Name\":\"OUT%d\",\n", i);
+        fprintf(f, "      \"ID\":%d,\n", output_ids[i]);
+        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", cfg.output_x, output_y[i]);
+        fprintf(f, "      \"BitCount\":1,\n");
+        fprintf(f, "      \"Colour\":0,\n");
+        fprintf(f, "      \"ValueDisplayMode\":0\n");
+        fprintf(f, "    }%s\n", (i < c->num_outputs - 1) ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // --- SubChips (Gates) ---
+    fprintf(f, "  \"SubChips\":[\n");
+    for (int i = 0; i < c->num_gates; i++) {
+        Gate *g = &c->gates[i];
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"Name\":\"%s\",\n", OP_NAMES[g->op]);
+        fprintf(f, "      \"ID\":%d,\n", gate_ids[i]);
+        fprintf(f, "      \"Label\":\"\",\n");
+        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", gate_x[i], gate_y[i]);
+        fprintf(f, "      \"OutputPinColourInfo\":[{\"PinColour\":0,\"PinID\":%d}],\n",
+                DLS2_PIN_MAP[g->op].output);
+        fprintf(f, "      \"InternalData\":null\n");
+        fprintf(f, "    }%s\n", (i < c->num_gates - 1) ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // --- Count total wires ---
+    int total_wires = c->num_outputs;
+    for (int i = 0; i < c->num_gates; i++) {
+        total_wires += (c->gates[i].op == OP_NOT) ? 1 : 2;
+    }
+
+    // --- Wires ---
+    fprintf(f, "  \"Wires\":[\n");
+    int wire_num = 0;
+
+    // Gate input wires
+    for (int i = 0; i < c->num_gates; i++) {
+        Gate *g = &c->gates[i];
+
+        // Wire A
+        int src_a = g->src_a;
+        float sx_a, sy_a;
+        int pin_a, owner_a;
+
+        if (src_a < c->num_inputs) {
+            sx_a = cfg.input_x;
+            sy_a = input_y[src_a];
+            pin_a = 0;
+            owner_a = input_ids[src_a];
+        } else {
+            int idx = src_a - c->num_inputs;
+            sx_a = gate_x[idx];
+            sy_a = gate_y[idx];
+            pin_a = DLS2_PIN_MAP[c->gates[idx].op].output;
+            owner_a = gate_ids[idx];
+        }
+
+        wire_num++;
+        write_wire_routed(f, pin_a, owner_a,
+                          DLS2_PIN_MAP[g->op].input_a, gate_ids[i],
+                          sx_a, sy_a, gate_x[i], gate_y[i],
+                          wire_num, &cfg,
+                          wire_num == total_wires);
+
+        // Wire B (if not NOT gate)
+        if (g->op != OP_NOT) {
+            int src_b = g->src_b;
+            float sx_b, sy_b;
+            int pin_b, owner_b;
+
+            if (src_b < c->num_inputs) {
+                sx_b = cfg.input_x;
+                sy_b = input_y[src_b];
+                pin_b = 0;
+                owner_b = input_ids[src_b];
+            } else {
+                int idx = src_b - c->num_inputs;
+                sx_b = gate_x[idx];
+                sy_b = gate_y[idx];
+                pin_b = DLS2_PIN_MAP[c->gates[idx].op].output;
+                owner_b = gate_ids[idx];
+            }
+
+            wire_num++;
+            write_wire_routed(f, pin_b, owner_b,
+                              DLS2_PIN_MAP[g->op].input_b, gate_ids[i],
+                              sx_b, sy_b, gate_x[i], gate_y[i],
+                              wire_num, &cfg,
+                              wire_num == total_wires);
+        }
+    }
+
+    // Output wires
+    for (int i = 0; i < c->num_outputs; i++) {
+        int src = c->output_map[i];
+        float sx, sy;
+        int pin, owner;
+
+        if (src < c->num_inputs) {
+            sx = cfg.input_x;
+            sy = input_y[src];
+            pin = 0;
+            owner = input_ids[src];
+        } else {
+            int idx = src - c->num_inputs;
+            sx = gate_x[idx];
+            sy = gate_y[idx];
+            pin = DLS2_PIN_MAP[c->gates[idx].op].output;
+            owner = gate_ids[idx];
+        }
+
+        wire_num++;
+        write_wire_routed(f, pin, owner, 0, output_ids[i],
+                          sx, sy, cfg.output_x, output_y[i],
+                          wire_num, &cfg,
+                          wire_num == total_wires);
+    }
+
+    fprintf(f, "  ],\n");
+    fprintf(f, "  \"Displays\": null\n");
+    fprintf(f, "}\n");
+
+    fclose(f);
+
+    // Print summary
+    printf("\n");
+    printf("╔══════════════════════════════════════════╗\n");
+    printf("║         DLS2 EXPORT COMPLETE             ║\n");
+    printf("╠══════════════════════════════════════════╣\n");
+    printf("║  File: %-32s ║\n", filename);
+    printf("║  Chip: %.2f x %.2f                       ║\n", chip_width, chip_height);
+    printf("║  Gates: %-3d  Depths: %-3d  Wires: %-3d    ║\n",
+           c->num_gates, max_depth + 1, total_wires);
+    printf("╚══════════════════════════════════════════╝\n");
+
+    update_project_description(DLS2_CHIP_NAME);
+}
 
 int main() {
     seed_rng(time(NULL));
@@ -1293,7 +1516,7 @@ int main() {
 
     // Separated by space you can specify allowed gates to be used "ALL" or "NOR XOR OR XNOR NAND AND NOT" or any combination of allowing.
     GrowthSolver solver;
-    solver_init(&solver, tt, "NAND OR XOR AND");
+    solver_init(&solver, tt, "ALL");
 
     Circuit solution;
     bool solved = solver_solve(&solver, MAX_SOLVE_GATES, STALL_LIMIT, &solution);
