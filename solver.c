@@ -13,18 +13,11 @@
 // pls set MAX_CHUNKS to: (2^MAX_INPUTS)/64
 #define MAX_CHUNKS 16          // 1024 bits / 64 bits per chunk = 16 chunks
 
-
-/* --- DLS2 Export Configuration --- */
-#define DLS2_CHIP_NAME "SYNTH"
-#define DLS2_HEIGHT_MULTIPLIER 0.35f
-#define DLS2_BASE_HEIGHT 0.5f
-
-
 // --- TUNING PARAMETERS ---
-#define STALL_LIMIT 75000
-#define MAX_SOLVE_GATES 200
-#define OPTIMIZATION_PLATEAU_LIMIT 150000
-#define TERMINATION_PLATEAU 5000000
+#define STALL_LIMIT 75000              
+#define MAX_SOLVE_GATES 200            
+#define OPTIMIZATION_PLATEAU_LIMIT 150000 
+#define TERMINATION_PLATEAU 5000000    
 
 // Op Codes
 #define OP_AND 0
@@ -122,11 +115,11 @@ int circuit_num_wires(Circuit *c) {
 }
 
 int circuit_add_random_gate(Circuit *c) {
-    if (c->num_gates >= MAX_GATES) return -1;
+    if (c->num_gates >= MAX_GATES) return -1; 
 
     int op_idx = randint(0, c->allowed_ops_count - 1);
     int op = c->allowed_ops[op_idx];
-
+    
     int max_src = circuit_num_wires(c) - 1;
     int src_a = randint(0, max_src);
     int src_b = randint(0, max_src);
@@ -142,7 +135,7 @@ int circuit_add_random_gate(Circuit *c) {
 void circuit_evaluate(Circuit *c, BitVec *packed_inputs, BitVec *results, int num_chunks) {
     BitVec wires[MAX_WIRES];
     static const BitVec zero_vec = {0};
-
+    
     // Load inputs
     for (int i = 0; i < c->num_inputs; i++) {
         wires[i] = packed_inputs[i];
@@ -156,7 +149,7 @@ void circuit_evaluate(Circuit *c, BitVec *packed_inputs, BitVec *results, int nu
         run_gate_vec(g->op, val_a, val_b, &wires[wire_ptr], num_chunks);
         wire_ptr++;
     }
-
+    
     for (int i = 0; i < c->num_outputs; i++) {
         results[i] = wires[c->output_map[i]];
     }
@@ -222,41 +215,41 @@ bool circuit_compact(Circuit *c) {
 /* --- Topological Gate Swap --- */
 void circuit_swap_gates(Circuit *c, int i, int j) {
     if (i == j || i < 0 || j < 0 || i >= c->num_gates || j >= c->num_gates) return;
-
+    
     // Ensure i < j for consistent handling
     if (i > j) { int tmp = i; i = j; j = tmp; }
-
+    
     int wire_i = c->num_inputs + i;
     int wire_j = c->num_inputs + j;
-
+    
     // Swap the gate structures
     Gate temp = c->gates[i];
     c->gates[i] = c->gates[j];
     c->gates[j] = temp;
-
+    
     // Update all wire references: swap wire_i <-> wire_j everywhere
     for (int k = 0; k < c->num_gates; k++) {
         // Update src_a
         if (c->gates[k].src_a == wire_i) c->gates[k].src_a = wire_j;
         else if (c->gates[k].src_a == wire_j) c->gates[k].src_a = wire_i;
-
+        
         // Update src_b
         if (c->gates[k].src_b == wire_i) c->gates[k].src_b = wire_j;
         else if (c->gates[k].src_b == wire_j) c->gates[k].src_b = wire_i;
     }
-
+    
     // Update output_map references
     for (int k = 0; k < c->num_outputs; k++) {
         if (c->output_map[k] == wire_i) c->output_map[k] = wire_j;
         else if (c->output_map[k] == wire_j) c->output_map[k] = wire_i;
     }
-
+    
     // CRITICAL: Fix topological validity for affected gates
     // Gates can only reference wires with index < (num_inputs + gate_index)
     for (int k = i; k <= j; k++) {
         int max_src_k = c->num_inputs + k - 1;
         if (max_src_k < 0) max_src_k = 0;
-
+        
         if (c->gates[k].src_a > max_src_k) {
             c->gates[k].src_a = randint(0, max_src_k);
         }
@@ -268,9 +261,9 @@ void circuit_swap_gates(Circuit *c, int i, int j) {
 
 void circuit_mutate(Circuit *c) {
     if (c->num_gates == 0) return;
-
+    
     double r = rand_double();
-
+    
     // 8% chance for gate swap mutation (if we have at least 2 gates)
     if (c->num_gates >= 2 && r < 0.08) {
         int i = randint(0, c->num_gates - 1);
@@ -282,7 +275,7 @@ void circuit_mutate(Circuit *c) {
         circuit_swap_gates(c, i, j);
         return;
     }
-
+    
     // Original mutation logic (remaining 92%)
     if (rand_double() < 0.75) {
         int idx = randint(0, c->num_gates - 1);
@@ -328,7 +321,7 @@ int count_set_bits_vec(const BitVec *v, int num_chunks) {
 void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_str) {
     s->allowed_ops_count = 0;
     if (strcmp(allowed_gates_str, "ALL") == 0) {
-        for(int i=0; i<NUM_OPS; i++) s->allowed_ops[i] = i;
+        for(int i=0; i<NUM_OPS; i++) s->allowed_ops[i] = i; 
         s->allowed_ops_count = NUM_OPS;
     } else {
         char buf[256];
@@ -347,7 +340,7 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
     tt_copy[sizeof(tt_copy) - 1] = '\0';
     char *saveptr;
     char *row_str = strtok_r(tt_copy, " ", &saveptr);
-
+    
     memset(s->inputs_bin, 0, sizeof(s->inputs_bin));
     memset(s->targets_bin, 0, sizeof(s->targets_bin));
     memset(s->masks_bin, 0, sizeof(s->masks_bin));
@@ -364,7 +357,7 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
             s->num_outputs = strlen(colon + 1);
         }
     }
-
+    
     if (s->num_inputs > MAX_INPUTS) {
         printf("Error: Input count (%d) exceeds MAX_INPUTS (%d)\n", s->num_inputs, MAX_INPUTS);
         exit(1);
@@ -386,12 +379,12 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
             *colon = '\0';
             char *lhs = row_str;
             char *rhs = colon + 1;
-
+            
             // UPGRADE: Support up to MAX_CHUNKS * 64 rows
             if (r_idx < MAX_CHUNKS * 64) {
                 int chunk_idx = r_idx / 64;
                 int bit_idx = r_idx % 64;
-
+                
                 for (int i = 0; i < s->num_inputs; i++) {
                     if (lhs[i] == '1') {
                         s->inputs_bin[i].chunks[chunk_idx] |= (1ULL << bit_idx);
@@ -423,7 +416,7 @@ int solver_score(GrowthSolver *s, Circuit *c) {
     int total = 0;
     for (int i = 0; i < s->num_outputs; i++) {
         for (int ch = 0; ch < s->num_chunks; ch++) {
-            uint64_t matches = ~(outputs[i].chunks[ch] ^ s->targets_bin[i].chunks[ch])
+            uint64_t matches = ~(outputs[i].chunks[ch] ^ s->targets_bin[i].chunks[ch]) 
                              & s->masks_bin[i].chunks[ch];
             total += count_set_bits(matches);
         }
@@ -484,10 +477,10 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
 
     int parent_score = solver_score(s, &parent);
     int best_score_at_size = parent_score;
-
-    int gens_since_improvement = 0;
-    int gens_since_kick_trigger = 0;
-    int gens_since_absolute_best = 0;
+    
+    int gens_since_improvement = 0;        
+    int gens_since_kick_trigger = 0;       
+    int gens_since_absolute_best = 0;      
 
     int gen = 0;
     int best_active = 999;
@@ -515,27 +508,27 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
 
         if (parent_score == s->max_score) {
             Circuit temp_check = parent;
-            circuit_compact(&temp_check);
+            circuit_compact(&temp_check); 
             int active = temp_check.num_gates;
 
             if (active < best_active) {
                 best_active = active;
                 *result = temp_check;
                 found_solution = true;
-
+                
                 gens_since_kick_trigger = 0;
                 gens_since_absolute_best = 0;
-
+                
                 printf("Gen %d: NEW BEST! %d gates.\n", gen, active);
                 solver_try_remove_gate(s, result);
                 int pruned_active = circuit_count_active(result);
-
+                
                 if (pruned_active < best_active) {
                      best_active = pruned_active;
                      // printf("  -> Pruned down to: %d gates\n", best_active);
                 }
-
-                parent = *result;
+                
+                parent = *result; 
                 parent.num_gates = pruned_active;
             }
         }
@@ -570,8 +563,8 @@ bool solver_solve(GrowthSolver *s, int max_gates, int stall_limit, Circuit *resu
         }
 
         if (gen % 50000 == 0) {
-             printf("Gen %d: GateNum: %d, Score: %d/%d, Activated Gates: %s%d\n",
-                   gen/100000, parent.num_gates, parent_score, s->max_score,
+             printf("Gen %d: GateNum: %d, Score: %d/%d, Activated Gates: %s%d\n", 
+                   gen/100000, parent.num_gates, parent_score, s->max_score, 
                    found_solution ? "" : "None yet", best_active == 999 ? 0 : best_active);
         }
     }
@@ -637,878 +630,11 @@ void render_circuit(Circuit *c, GrowthSolver *s) {
     free(lines);
 }
 
-
-
-
-
-
-
-/* --- Project Description Updater --- */
-#define PROJECT_DESC_PATH "../ProjectDescription.json"
-
-// Helper: Get current timestamp in ISO 8601 format
-static void get_iso_timestamp(char* buffer, size_t size) {
-    time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    strftime(buffer, size, "%Y-%m-%dT%H:%M:%S.000+00:00", tm_info);
-}
-
-// Helper: Insert string at position, shifting rest of content
-static bool insert_at(char* json, size_t pos, const char* insert, size_t json_buf_size) {
-    size_t json_len = strlen(json);
-    size_t insert_len = strlen(insert);
-
-    // Safety check: ensure we have room
-    if (json_len + insert_len >= json_buf_size) {
-        printf("Warning: Buffer too small for insertion\n");
-        return false;
-    }
-
-    // Shift existing content
-    memmove(json + pos + insert_len, json + pos, json_len - pos + 1);
-    // Copy insert string
-    memcpy(json + pos, insert, insert_len);
-    return true;
-}
-
-// Helper: Check if a name exists within a specific range of the JSON
-static bool name_exists_in_range(const char* start, const char* end, const char* name) {
-    if (!start || !end || end <= start) return false;
-
-    char search[256];
-    snprintf(search, sizeof(search), "\"%s\"", name);
-
-    const char* found = start;
-    while ((found = strstr(found, search)) != NULL) {
-        if (found < end) {
-            return true;  // Found within range
-        }
-        break;  // Found but past our range
-    }
-    return false;
-}
-
-// Helper: Find the closing bracket of a JSON array, handling nested structures
-static const char* find_array_end(const char* arr_start) {
-    if (!arr_start || *arr_start != '[') return NULL;
-
-    int depth = 1;
-    const char* p = arr_start + 1;
-
-    while (*p && depth > 0) {
-        if (*p == '[' || *p == '{') depth++;
-        else if (*p == ']' || *p == '}') depth--;
-        if (depth > 0) p++;
-    }
-
-    return (depth == 0) ? p : NULL;
-}
-
-// Update ProjectDescription.json to include the new chip
-bool update_project_description(const char* chip_name) {
-    // Validate chip name
-    if (!chip_name || strlen(chip_name) == 0) {
-        printf("Warning: Invalid chip name\n");
-        return false;
-    }
-
-    FILE* f = fopen(PROJECT_DESC_PATH, "r");
-    if (!f) {
-        printf("Warning: Could not open %s\n", PROJECT_DESC_PATH);
-        printf("         Make sure you're running from the Chips folder.\n");
-        return false;
-    }
-
-    // Read entire file
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (size <= 0) {
-        printf("Warning: ProjectDescription.json is empty or unreadable\n");
-        fclose(f);
-        return false;
-    }
-
-    // Allocate with extra space for insertions
-    size_t buf_size = size + 4096;
-    char* json = (char*)malloc(buf_size);
-    if (!json) {
-        fclose(f);
-        return false;
-    }
-    memset(json, 0, buf_size);
-    fread(json, 1, size, f);
-    fclose(f);
-
-    bool modified = false;
-    char insert_buf[512];
-
-    printf("Updating ProjectDescription.json for chip '%s'...\n", chip_name);
-
-    // --- 1. Update LastSaveTime ---
-    char timestamp[64];
-    get_iso_timestamp(timestamp, sizeof(timestamp));
-
-    const char* last_save = strstr(json, "\"LastSaveTime\"");
-    if (last_save) {
-        const char* colon = strchr(last_save, ':');
-        if (colon) {
-            const char* quote1 = strchr(colon, '"');
-            if (quote1) {
-                const char* quote2 = strchr(quote1 + 1, '"');
-                if (quote2) {
-                    size_t start = quote1 - json + 1;
-                    size_t old_len = quote2 - quote1 - 1;
-                    size_t new_len = strlen(timestamp);
-
-                    memmove((char*)quote1 + 1 + new_len, quote2, strlen(quote2) + 1);
-                    memcpy((char*)quote1 + 1, timestamp, new_len);
-                    modified = true;
-                }
-            }
-        }
-    }
-
-    // --- 2. Check and add to AllCustomChipNames ---
-    const char* all_chips_key = strstr(json, "\"AllCustomChipNames\"");
-    if (all_chips_key) {
-        const char* arr_start = strchr(all_chips_key, '[');
-        const char* arr_end = arr_start ? find_array_end(arr_start) : NULL;
-
-        if (arr_start && arr_end) {
-            if (name_exists_in_range(arr_start, arr_end, chip_name)) {
-                printf("  [SKIP] AllCustomChipNames: '%s' already exists\n", chip_name);
-            } else {
-                // Add the chip
-                snprintf(insert_buf, sizeof(insert_buf), ",\n    \"%s\"", chip_name);
-                size_t insert_pos = arr_end - json;
-                if (insert_at(json, insert_pos, insert_buf, buf_size)) {
-                    printf("  [ADD]  AllCustomChipNames: '%s'\n", chip_name);
-                    modified = true;
-                }
-            }
-        }
-    } else {
-        printf("  [WARN] AllCustomChipNames section not found\n");
-    }
-
-    // --- 3. Check and add to StarredList ---
-    const char* starred_key = strstr(json, "\"StarredList\"");
-    if (starred_key) {
-        const char* arr_start = strchr(starred_key, '[');
-        const char* arr_end = arr_start ? find_array_end(arr_start) : NULL;
-
-        if (arr_start && arr_end) {
-            // For StarredList, we need to search for "Name":"CHIPNAME"
-            char name_search[256];
-            snprintf(name_search, sizeof(name_search), "\"Name\":\"%s\"", chip_name);
-
-            const char* found = strstr(arr_start, name_search);
-            if (found && found < arr_end) {
-                printf("  [SKIP] StarredList: '%s' already exists\n", chip_name);
-            } else {
-                snprintf(insert_buf, sizeof(insert_buf),
-                         ",\n    {\n      \"Name\":\"%s\",\n      \"IsCollection\":false\n    }",
-                         chip_name);
-                size_t insert_pos = arr_end - json;
-                if (insert_at(json, insert_pos, insert_buf, buf_size)) {
-                    printf("  [ADD]  StarredList: '%s'\n", chip_name);
-                    modified = true;
-                }
-            }
-        }
-    } else {
-        printf("  [WARN] StarredList section not found\n");
-    }
-
-    // --- 4. Check and add to OTHER collection in ChipCollections ---
-    // Need to re-find after previous insertions may have shifted positions
-    const char* other_name = strstr(json, "\"Name\":\"OTHER\"");
-    if (other_name) {
-        // Search backwards for "Chips":[ that belongs to this collection
-        const char* search_start = other_name - 500;
-        if (search_start < json) search_start = json;
-
-        const char* chips_key = NULL;
-        const char* p = other_name;
-        while (p > search_start) {
-            if (strncmp(p, "\"Chips\":[", 9) == 0) {
-                chips_key = p;
-                break;
-            }
-            p--;
-        }
-
-        if (chips_key) {
-            const char* chips_arr_start = strchr(chips_key, '[');
-            const char* chips_arr_end = chips_arr_start ? strchr(chips_arr_start, ']') : NULL;
-
-            if (chips_arr_start && chips_arr_end && chips_arr_end < other_name) {
-                if (name_exists_in_range(chips_arr_start, chips_arr_end, chip_name)) {
-                    printf("  [SKIP] OTHER collection: '%s' already exists\n", chip_name);
-                } else {
-                    snprintf(insert_buf, sizeof(insert_buf), ",\"%s\"", chip_name);
-                    size_t insert_pos = chips_arr_end - json;
-                    if (insert_at(json, insert_pos, insert_buf, buf_size)) {
-                        printf("  [ADD]  OTHER collection: '%s'\n", chip_name);
-                        modified = true;
-                    }
-                }
-            }
-        }
-    } else {
-        printf("  [WARN] OTHER collection not found in ChipCollections\n");
-    }
-
-    // --- Write back if modified ---
-    if (modified) {
-        f = fopen(PROJECT_DESC_PATH, "w");
-        if (!f) {
-            printf("Error: Could not write to %s\n", PROJECT_DESC_PATH);
-            free(json);
-            return false;
-        }
-        fputs(json, f);
-        fclose(f);
-        printf("ProjectDescription.json updated successfully!\n");
-    } else {
-        printf("No changes needed - chip '%s' fully registered\n", chip_name);
-    }
-
-    free(json);
-    return true;
-}
-
-
-
-
-
-
-
-/* --- Dynamic Pin Mapping System --- */
-typedef struct {
-    int input_a;
-    int input_b;    // -1 for NOT gate (single input)
-    int output;
-    bool loaded;    // Whether successfully loaded from file
-} GatePinMapping;
-
-// Mutable pin map - NAND is pre-initialized as the built-in default
-static GatePinMapping DLS2_PIN_MAP[NUM_OPS] = {
-    [OP_AND]  = {0, 0, 0, false},
-    [OP_OR]   = {0, 0, 0, false},
-    [OP_NAND] = {0, 1, 2, true},    // NAND is built-in, always available
-    [OP_NOR]  = {0, 0, 0, false},
-    [OP_XOR]  = {0, 0, 0, false},
-    [OP_NOT]  = {0, -1, 0, false},
-    [OP_XNOR] = {0, 0, 0, false}
-};
-
-// Filenames to search for each gate type (indexed by OP_*)
-// NULL means skip loading (use default)
-static const char* GATE_FILENAMES[NUM_OPS] = {
-    "AND.json",    // OP_AND = 0
-    "OR.json",     // OP_OR = 1
-    NULL,          // OP_NAND = 2 (built-in, no file needed)
-    "NOR.json",    // OP_NOR = 3
-    "XOR.json",    // OP_XOR = 4
-    "NOT.json",    // OP_NOT = 5
-    "XNOR.json"    // OP_XNOR = 6
-};
-
-// Helper: Skip whitespace in string
-static const char* skip_whitespace(const char* p) {
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    return p;
-}
-
-// Helper: Find a key in JSON and return pointer to its value
-static const char* find_json_key(const char* json, const char* key) {
-    char search[64];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-    const char* pos = strstr(json, search);
-    if (!pos) return NULL;
-    pos += strlen(search);
-    pos = skip_whitespace(pos);
-    if (*pos == ':') pos++;
-    return skip_whitespace(pos);
-}
-
-// Helper: Extract integer at current position
-static int extract_int(const char* p) {
-    while (*p && (*p < '0' || *p > '9') && *p != '-') p++;
-    return atoi(p);
-}
-
-// Parse a gate JSON file and extract pin IDs
-static bool load_gate_pins_from_file(int op_index, const char* filename) {
-    FILE* f = fopen(filename, "r");
-    if (!f) return false;
-
-    // Read entire file into memory
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    char* json = (char*)malloc(size + 1);
-    if (!json) {
-        fclose(f);
-        return false;
-    }
-    fread(json, 1, size, f);
-    json[size] = '\0';
-    fclose(f);
-
-    bool success = false;
-
-    // Find InputPins section
-    const char* input_section = find_json_key(json, "InputPins");
-    if (!input_section) goto cleanup;
-
-    // Find OutputPins section (to know where InputPins ends)
-    const char* output_section = find_json_key(json, "OutputPins");
-    if (!output_section) goto cleanup;
-
-    // Extract first input pin ID (input_a)
-    const char* id_pos = strstr(input_section, "\"ID\"");
-    if (!id_pos || id_pos > output_section) goto cleanup;
-    id_pos = find_json_key(id_pos, "ID");
-    if (!id_pos) goto cleanup;
-    DLS2_PIN_MAP[op_index].input_a = extract_int(id_pos);
-
-    // For 2-input gates, extract second input pin ID (input_b)
-    if (op_index != OP_NOT) {
-        const char* second_id = strstr(id_pos + 1, "\"ID\"");
-        if (second_id && second_id < output_section) {
-            second_id = find_json_key(second_id, "ID");
-            if (second_id) {
-                DLS2_PIN_MAP[op_index].input_b = extract_int(second_id);
-            }
-        }
-    } else {
-        DLS2_PIN_MAP[op_index].input_b = -1;
-    }
-
-    // Extract output pin ID
-    id_pos = strstr(output_section, "\"ID\"");
-    if (!id_pos) goto cleanup;
-    id_pos = find_json_key(id_pos, "ID");
-    if (!id_pos) goto cleanup;
-    DLS2_PIN_MAP[op_index].output = extract_int(id_pos);
-
-    DLS2_PIN_MAP[op_index].loaded = true;
-    success = true;
-
-    cleanup:
-    free(json);
-    return success;
-}
-
-// Load all gate pin mappings from JSON files
-void load_dls2_pin_mappings(void) {
-    printf("=== Loading DLS2 Gate Pin Mappings ===\n");
-
-    // NAND is always available (built-in)
-    printf("  [OK] NAND  : in_a=%d, in_b=%d, out=%d (built-in)\n",
-           DLS2_PIN_MAP[OP_NAND].input_a,
-           DLS2_PIN_MAP[OP_NAND].input_b,
-           DLS2_PIN_MAP[OP_NAND].output);
-
-    int loaded_count = 1;  // NAND already counted
-
-    for (int i = 0; i < NUM_OPS; i++) {
-        // Skip NAND (already loaded as built-in)
-        if (i == OP_NAND || GATE_FILENAMES[i] == NULL) continue;
-
-        if (load_gate_pins_from_file(i, GATE_FILENAMES[i])) {
-            loaded_count++;
-            if (i == OP_NOT) {
-                printf("  [OK] %-5s : in=%d, out=%d\n",
-                       OP_NAMES[i],
-                       DLS2_PIN_MAP[i].input_a,
-                       DLS2_PIN_MAP[i].output);
-            } else {
-                printf("  [OK] %-5s : in_a=%d, in_b=%d, out=%d\n",
-                       OP_NAMES[i],
-                       DLS2_PIN_MAP[i].input_a,
-                       DLS2_PIN_MAP[i].input_b,
-                       DLS2_PIN_MAP[i].output);
-            }
-        } else {
-            printf("  [--] %-5s : %s not found\n", OP_NAMES[i], GATE_FILENAMES[i]);
-        }
-    }
-
-    printf("Loaded %d/%d gate definitions\n", loaded_count, NUM_OPS);
-    printf("=======================================\n\n");
-}
-
-// Check if a specific gate type is available
-bool is_gate_available(int op) {
-    return (op >= 0 && op < NUM_OPS && DLS2_PIN_MAP[op].loaded);
-}
-
-/* ============================================================
- * DLS2 LAYOUT CONFIGURATION
- * Adjust these values to customize the chip appearance
- * ============================================================ */
-typedef struct {
-    // === COORDINATE BOUNDS ===
-    float y_min;                // Bottom Y bound
-    float y_max;                // Top Y bound
-    float input_x;              // X position of input pins
-    float output_x;             // X position of output pins
-    float gate_x_min;           // Leftmost gate X position
-    float gate_x_max;           // Rightmost gate X position
-
-    // === SPACING ===
-    float min_gate_h_spacing;   // Minimum horizontal space between depth columns
-    float min_gate_v_spacing;   // Minimum vertical space between gates
-    float input_v_spacing;      // Vertical spacing between input pins
-    float output_v_spacing;     // Vertical spacing between output pins
-
-    // === WIRE ROUTING ===
-    float wire_spread;          // How much to spread parallel wires
-    float wire_offset_base;     // Base offset for wire waypoints
-
-    // === VISUAL FLOW ===
-    float depth_y_drift;        // Downward drift per depth level (cascade effect)
-    bool center_single_gates;   // Center gates that are alone at their depth
-
-    // === CHIP APPEARANCE ===
-    float chip_color_r;
-    float chip_color_g;
-    float chip_color_b;
-} LayoutConfig;
-
-// Default configuration - spread out and clear
-static LayoutConfig get_default_layout_config(void) {
-    LayoutConfig cfg = {
-        // Bounds - generous space
-        .y_min = -5.0f,
-        .y_max = 5.0f,
-        .input_x = -9.0f,
-        .output_x = 9.0f,
-        .gate_x_min = -6.0f,
-        .gate_x_max = 6.0f,
-
-        // Spacing - room to breathe
-        .min_gate_h_spacing = 2.0f,
-        .min_gate_v_spacing = 1.5f,
-        .input_v_spacing = 1.0f,
-        .output_v_spacing = 1.0f,
-
-        // Wire routing
-        .wire_spread = 0.15f,
-        .wire_offset_base = 0.5f,
-
-        // Visual flow
-        .depth_y_drift = 0.2f,
-        .center_single_gates = true,
-
-        // Chip color (blue-ish)
-        .chip_color_r = 0.25f,
-        .chip_color_g = 0.45f,
-        .chip_color_b = 0.70f
-    };
-    return cfg;
-}
-
-/* ============================================================
- * LAYOUT HELPERS
- * ============================================================ */
-
-static void calculate_gate_depths(Circuit *c, int *depths) {
-    for (int i = 0; i < c->num_gates; i++) {
-        depths[i] = 0;
-        Gate *g = &c->gates[i];
-
-        if (g->src_a >= c->num_inputs) {
-            int d = depths[g->src_a - c->num_inputs] + 1;
-            if (d > depths[i]) depths[i] = d;
-        }
-        if (g->op != OP_NOT && g->src_b >= c->num_inputs) {
-            int d = depths[g->src_b - c->num_inputs] + 1;
-            if (d > depths[i]) depths[i] = d;
-        }
-    }
-}
-
-static int get_max_depth(int *depths, int num_gates) {
-    int max_d = 0;
-    for (int i = 0; i < num_gates; i++) {
-        if (depths[i] > max_d) max_d = depths[i];
-    }
-    return max_d;
-}
-
-static float absf(float x) { return (x < 0) ? -x : x; }
-static float minf(float a, float b) { return (a < b) ? a : b; }
-static float maxf(float a, float b) { return (a > b) ? a : b; }
-
-/* ============================================================
- * WIRE ROUTING WITH CHANNELS
- * ============================================================ */
-static void write_wire_routed(FILE *f,
-                              int src_pin, int src_owner,
-                              int tgt_pin, int tgt_owner,
-                              float src_x, float src_y,
-                              float tgt_x, float tgt_y,
-                              int wire_index,      // For offset calculation
-                              LayoutConfig *cfg,
-                              bool is_last) {
-    fprintf(f, "    {\n");
-    fprintf(f, "      \"SourcePinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", src_pin, src_owner);
-    fprintf(f, "      \"TargetPinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", tgt_pin, tgt_owner);
-    fprintf(f, "      \"ConnectionType\":0,\n");
-    fprintf(f, "      \"ConnectedWireIndex\":-1,\n");
-    fprintf(f, "      \"ConnectedWireSegmentIndex\":-1,\n");
-
-    float dx = tgt_x - src_x;
-    float dy = tgt_y - src_y;
-
-    // Direct connection for very close or nearly horizontal wires
-    if (absf(dy) < 0.4f && dx < 2.0f) {
-        fprintf(f, "      \"Points\":[{\"x\":0.0,\"y\":0.0},{\"x\":0.0,\"y\":0.0}]\n");
-    } else {
-        // Calculate wire channel offset to prevent overlap
-        float channel_offset = cfg->wire_offset_base + (wire_index % 5) * cfg->wire_spread;
-
-        // Alternate direction of offset based on wire index
-        if (wire_index % 2 == 1) channel_offset = -channel_offset;
-
-        // L-shaped routing through channel
-        float mid_x = src_x + dx * 0.5f + channel_offset;
-
-        fprintf(f, "      \"Points\":[");
-        fprintf(f, "{\"x\":0.0,\"y\":0.0},");
-        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", mid_x, src_y);
-        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", mid_x, tgt_y);
-        fprintf(f, "{\"x\":0.0,\"y\":0.0}]\n");
-    }
-
-    fprintf(f, "    }%s\n", is_last ? "" : ",");
-}
-
-/* ============================================================
- * MAIN EXPORT FUNCTION
- * ============================================================ */
-void render_dls2_json(Circuit *c, GrowthSolver *s) {
-    // Get layout configuration
-    LayoutConfig cfg = get_default_layout_config();
-
-    // Validate pin mappings
-    for (int i = 0; i < c->num_gates; i++) {
-        if (!DLS2_PIN_MAP[c->gates[i].op].loaded) {
-            printf("Error: Gate %s (#%d) has no pin mapping!\n",
-                   OP_NAMES[c->gates[i].op], i);
-            return;
-        }
-    }
-
-    char filename[256];
-    snprintf(filename, sizeof(filename), "%s.json", DLS2_CHIP_NAME);
-
-    FILE *f = fopen(filename, "w");
-    if (!f) {
-        printf("Error: Cannot open %s\n", filename);
-        return;
-    }
-
-    // === CALCULATE DEPTHS ===
-    int depths[MAX_GATES];
-    calculate_gate_depths(c, depths);
-    int max_depth = get_max_depth(depths, c->num_gates);
-
-    // === ALLOCATE IDs ===
-    int input_ids[MAX_INPUTS];
-    int output_ids[MAX_OUTPUTS];
-    int gate_ids[MAX_GATES];
-
-    for (int i = 0; i < c->num_inputs; i++)  input_ids[i]  = 1000 + i;
-    for (int i = 0; i < c->num_outputs; i++) output_ids[i] = 2000 + i;
-    for (int i = 0; i < c->num_gates; i++)   gate_ids[i]   = 3000 + i;
-
-    // === INPUT POSITIONS ===
-    float input_y[MAX_INPUTS];
-    float total_input_height = (c->num_inputs - 1) * cfg.input_v_spacing;
-    float input_start_y = total_input_height / 2.0f;
-
-    for (int i = 0; i < c->num_inputs; i++) {
-        input_y[i] = input_start_y - i * cfg.input_v_spacing;
-    }
-
-    // === COUNT GATES PER DEPTH ===
-    int count_at_depth[100] = {0};
-    int idx_at_depth[MAX_GATES];
-
-    for (int i = 0; i < c->num_gates; i++) {
-        idx_at_depth[i] = count_at_depth[depths[i]];
-        count_at_depth[depths[i]]++;
-    }
-
-    // Find max gates at any single depth (for spacing calculation)
-    int max_gates_at_depth = 0;
-    for (int d = 0; d <= max_depth; d++) {
-        if (count_at_depth[d] > max_gates_at_depth) {
-            max_gates_at_depth = count_at_depth[d];
-        }
-    }
-
-    // === GATE POSITIONS ===
-    float gate_x[MAX_GATES];
-    float gate_y[MAX_GATES];
-
-    // Calculate horizontal spacing
-    float h_spacing = cfg.min_gate_h_spacing;
-    if (max_depth > 0) {
-        float available_width = cfg.gate_x_max - cfg.gate_x_min;
-        float needed_spacing = available_width / (max_depth + 1);
-        h_spacing = maxf(cfg.min_gate_h_spacing, needed_spacing);
-    }
-
-    // Position gates
-    for (int i = 0; i < c->num_gates; i++) {
-        Gate *g = &c->gates[i];
-        int d = depths[i];
-        int idx = idx_at_depth[i];
-        int count = count_at_depth[d];
-
-        // === X POSITION: Based on depth ===
-        gate_x[i] = cfg.gate_x_min + (d + 0.5f) * h_spacing;
-
-        // === Y POSITION ===
-        if (count == 1 && cfg.center_single_gates) {
-            // Single gate: position based on source average
-            float sum_y = 0.0f;
-            int n = 0;
-
-            if (g->src_a < c->num_inputs) {
-                sum_y += input_y[g->src_a];
-            } else {
-                sum_y += gate_y[g->src_a - c->num_inputs];
-            }
-            n++;
-
-            if (g->op != OP_NOT) {
-                if (g->src_b < c->num_inputs) {
-                    sum_y += input_y[g->src_b];
-                } else {
-                    sum_y += gate_y[g->src_b - c->num_inputs];
-                }
-                n++;
-            }
-
-            gate_y[i] = sum_y / n;
-        } else {
-            // Multiple gates: spread evenly with good spacing
-            float col_height = (count - 1) * cfg.min_gate_v_spacing;
-            float col_start_y = col_height / 2.0f;
-            gate_y[i] = col_start_y - idx * cfg.min_gate_v_spacing;
-        }
-
-        // Apply depth drift for visual cascade
-        gate_y[i] -= d * cfg.depth_y_drift;
-
-        // Clamp to bounds with margin
-        gate_y[i] = maxf(cfg.y_min + 0.5f, minf(cfg.y_max - 0.5f, gate_y[i]));
-    }
-
-    // === OUTPUT POSITIONS ===
-    float output_y[MAX_OUTPUTS];
-    float total_output_height = (c->num_outputs - 1) * cfg.output_v_spacing;
-    float output_start_y = total_output_height / 2.0f;
-
-    for (int i = 0; i < c->num_outputs; i++) {
-        output_y[i] = output_start_y - i * cfg.output_v_spacing;
-    }
-
-    // === CHIP SIZE ===
-    int max_pins = (c->num_inputs > c->num_outputs) ? c->num_inputs : c->num_outputs;
-
-    float chip_height = 0.5f;
-    if (max_pins > 2) chip_height += (max_pins - 2) * 0.35f;
-    if (max_gates_at_depth > 3) chip_height += (max_gates_at_depth - 3) * 0.2f;
-    chip_height = minf(chip_height, 3.0f);
-
-    float chip_width = 0.725f;
-    if (max_depth > 2) chip_width += (max_depth - 2) * 0.15f;
-    if (c->num_gates > 8) chip_width += (c->num_gates - 8) * 0.03f;
-    chip_width = minf(chip_width, 2.5f);
-
-    // === JSON OUTPUT ===
-    fprintf(f, "{\n");
-    fprintf(f, "  \"DLSVersion\": \"2.1.6\",\n");
-    fprintf(f, "  \"Name\": \"%s\",\n", DLS2_CHIP_NAME);
-    fprintf(f, "  \"NameLocation\": 0,\n");
-    fprintf(f, "  \"ChipType\": 0,\n");
-    fprintf(f, "  \"Size\": {\"x\": %.3f, \"y\": %.3f},\n", chip_width, chip_height);
-    fprintf(f, "  \"Colour\": {\"r\": %.3f, \"g\": %.3f, \"b\": %.3f, \"a\": 1},\n",
-            cfg.chip_color_r, cfg.chip_color_g, cfg.chip_color_b);
-
-    // --- InputPins ---
-    fprintf(f, "  \"InputPins\":[\n");
-    for (int i = 0; i < c->num_inputs; i++) {
-        fprintf(f, "    {\n");
-        fprintf(f, "      \"Name\":\"IN%d\",\n", i);
-        fprintf(f, "      \"ID\":%d,\n", input_ids[i]);
-        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", cfg.input_x, input_y[i]);
-        fprintf(f, "      \"BitCount\":1,\n");
-        fprintf(f, "      \"Colour\":0,\n");
-        fprintf(f, "      \"ValueDisplayMode\":0\n");
-        fprintf(f, "    }%s\n", (i < c->num_inputs - 1) ? "," : "");
-    }
-    fprintf(f, "  ],\n");
-
-    // --- OutputPins ---
-    fprintf(f, "  \"OutputPins\":[\n");
-    for (int i = 0; i < c->num_outputs; i++) {
-        fprintf(f, "    {\n");
-        fprintf(f, "      \"Name\":\"OUT%d\",\n", i);
-        fprintf(f, "      \"ID\":%d,\n", output_ids[i]);
-        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", cfg.output_x, output_y[i]);
-        fprintf(f, "      \"BitCount\":1,\n");
-        fprintf(f, "      \"Colour\":0,\n");
-        fprintf(f, "      \"ValueDisplayMode\":0\n");
-        fprintf(f, "    }%s\n", (i < c->num_outputs - 1) ? "," : "");
-    }
-    fprintf(f, "  ],\n");
-
-    // --- SubChips (Gates) ---
-    fprintf(f, "  \"SubChips\":[\n");
-    for (int i = 0; i < c->num_gates; i++) {
-        Gate *g = &c->gates[i];
-        fprintf(f, "    {\n");
-        fprintf(f, "      \"Name\":\"%s\",\n", OP_NAMES[g->op]);
-        fprintf(f, "      \"ID\":%d,\n", gate_ids[i]);
-        fprintf(f, "      \"Label\":\"\",\n");
-        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", gate_x[i], gate_y[i]);
-        fprintf(f, "      \"OutputPinColourInfo\":[{\"PinColour\":0,\"PinID\":%d}],\n",
-                DLS2_PIN_MAP[g->op].output);
-        fprintf(f, "      \"InternalData\":null\n");
-        fprintf(f, "    }%s\n", (i < c->num_gates - 1) ? "," : "");
-    }
-    fprintf(f, "  ],\n");
-
-    // --- Count total wires ---
-    int total_wires = c->num_outputs;
-    for (int i = 0; i < c->num_gates; i++) {
-        total_wires += (c->gates[i].op == OP_NOT) ? 1 : 2;
-    }
-
-    // --- Wires ---
-    fprintf(f, "  \"Wires\":[\n");
-    int wire_num = 0;
-
-    // Gate input wires
-    for (int i = 0; i < c->num_gates; i++) {
-        Gate *g = &c->gates[i];
-
-        // Wire A
-        int src_a = g->src_a;
-        float sx_a, sy_a;
-        int pin_a, owner_a;
-
-        if (src_a < c->num_inputs) {
-            sx_a = cfg.input_x;
-            sy_a = input_y[src_a];
-            pin_a = 0;
-            owner_a = input_ids[src_a];
-        } else {
-            int idx = src_a - c->num_inputs;
-            sx_a = gate_x[idx];
-            sy_a = gate_y[idx];
-            pin_a = DLS2_PIN_MAP[c->gates[idx].op].output;
-            owner_a = gate_ids[idx];
-        }
-
-        wire_num++;
-        write_wire_routed(f, pin_a, owner_a,
-                          DLS2_PIN_MAP[g->op].input_a, gate_ids[i],
-                          sx_a, sy_a, gate_x[i], gate_y[i],
-                          wire_num, &cfg,
-                          wire_num == total_wires);
-
-        // Wire B (if not NOT gate)
-        if (g->op != OP_NOT) {
-            int src_b = g->src_b;
-            float sx_b, sy_b;
-            int pin_b, owner_b;
-
-            if (src_b < c->num_inputs) {
-                sx_b = cfg.input_x;
-                sy_b = input_y[src_b];
-                pin_b = 0;
-                owner_b = input_ids[src_b];
-            } else {
-                int idx = src_b - c->num_inputs;
-                sx_b = gate_x[idx];
-                sy_b = gate_y[idx];
-                pin_b = DLS2_PIN_MAP[c->gates[idx].op].output;
-                owner_b = gate_ids[idx];
-            }
-
-            wire_num++;
-            write_wire_routed(f, pin_b, owner_b,
-                              DLS2_PIN_MAP[g->op].input_b, gate_ids[i],
-                              sx_b, sy_b, gate_x[i], gate_y[i],
-                              wire_num, &cfg,
-                              wire_num == total_wires);
-        }
-    }
-
-    // Output wires
-    for (int i = 0; i < c->num_outputs; i++) {
-        int src = c->output_map[i];
-        float sx, sy;
-        int pin, owner;
-
-        if (src < c->num_inputs) {
-            sx = cfg.input_x;
-            sy = input_y[src];
-            pin = 0;
-            owner = input_ids[src];
-        } else {
-            int idx = src - c->num_inputs;
-            sx = gate_x[idx];
-            sy = gate_y[idx];
-            pin = DLS2_PIN_MAP[c->gates[idx].op].output;
-            owner = gate_ids[idx];
-        }
-
-        wire_num++;
-        write_wire_routed(f, pin, owner, 0, output_ids[i],
-                          sx, sy, cfg.output_x, output_y[i],
-                          wire_num, &cfg,
-                          wire_num == total_wires);
-    }
-
-    fprintf(f, "  ],\n");
-    fprintf(f, "  \"Displays\": null\n");
-    fprintf(f, "}\n");
-
-    fclose(f);
-
-    // Print summary
-    printf("\n");
-    printf("╔══════════════════════════════════════════╗\n");
-    printf("║         DLS2 EXPORT COMPLETE             ║\n");
-    printf("╠══════════════════════════════════════════╣\n");
-    printf("║  File: %-32s ║\n", filename);
-    printf("║  Chip: %.2f x %.2f                       ║\n", chip_width, chip_height);
-    printf("║  Gates: %-3d  Depths: %-3d  Wires: %-3d    ║\n",
-           c->num_gates, max_depth + 1, total_wires);
-    printf("╚══════════════════════════════════════════╝\n");
-
-    update_project_description(DLS2_CHIP_NAME);
-}
-
 int main() {
     seed_rng(time(NULL));
-    load_dls2_pin_mappings();
+
     // input truth table separated by spaces i.e. "00:0 01:1 10:1 11:0"
-    const char *tt =
+    const char *tt = 
         "0000:1111110 0001:0110000 0010:1101101 0011:1111001 "
         "0100:0110011 0101:1011011 0110:1011111 0111:1110000 "
         "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
@@ -1516,14 +642,13 @@ int main() {
 
     // Separated by space you can specify allowed gates to be used "ALL" or "NOR XOR OR XNOR NAND AND NOT" or any combination of allowing.
     GrowthSolver solver;
-    solver_init(&solver, tt, "ALL");
+    solver_init(&solver, tt, "NAND OR XOR AND");
 
     Circuit solution;
     bool solved = solver_solve(&solver, MAX_SOLVE_GATES, STALL_LIMIT, &solution);
 
     if (solved) {
         render_circuit(&solution, &solver);
-        render_dls2_json(&solution, &solver);; // New JSON export
     }
 
     return 0;
