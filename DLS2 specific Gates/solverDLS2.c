@@ -8,7 +8,7 @@
 /* --- Configuration & Constants --- */
 #define MAX_INPUTS 10          // Upgraded to allow up to 10 inputs (1024 rows)
 #define MAX_OUTPUTS 16
-#define MAX_GATES 300          // Increased capacity
+#define MAX_GATES 300         // Increased capacity
 #define MAX_WIRES (MAX_INPUTS + MAX_GATES)
 // pls set MAX_CHUNKS to: (2^MAX_INPUTS)/64
 #define MAX_CHUNKS 16          // 1024 bits / 64 bits per chunk = 16 chunks
@@ -21,8 +21,8 @@
 
 
 // --- TUNING PARAMETERS ---
-#define STALL_LIMIT 75000
-#define MAX_SOLVE_GATES 200
+#define STALL_LIMIT 10000
+#define MAX_SOLVE_GATES 300
 #define OPTIMIZATION_PLATEAU_LIMIT 150000
 #define TERMINATION_PLATEAU 5000000
 
@@ -1050,74 +1050,61 @@ bool is_gate_available(int op) {
 }
 
 /* ============================================================
- * DLS2 LAYOUT CONFIGURATION
- * Adjust these values to customize the chip appearance
+ * DLS2 GRID-BASED MANHATTAN ROUTING SYSTEM
+ * Version 3.0 - Clean Alleyway Routing
  * ============================================================ */
+
 typedef struct {
-    // === COORDINATE BOUNDS ===
-    float y_min;                // Bottom Y bound
-    float y_max;                // Top Y bound
-    float input_x;              // X position of input pins
-    float output_x;             // X position of output pins
-    float gate_x_min;           // Leftmost gate X position
-    float gate_x_max;           // Rightmost gate X position
+    // === PHYSICAL CONSTANTS ===
+    float gate_width;           // Physical width of a gate hitbox
+    float gate_height;          // Physical height of a gate hitbox
 
-    // === SPACING ===
-    float min_gate_h_spacing;   // Minimum horizontal space between depth columns
-    float min_gate_v_spacing;   // Minimum vertical space between gates
-    float input_v_spacing;      // Vertical spacing between input pins
-    float output_v_spacing;     // Vertical spacing between output pins
+    // === GRID SPACING ===
+    float column_spacing;       // Distance between column centers (must be > gate_width + alley_width)
+    float alley_width;          // Width reserved for wire routing between columns
+    float min_gate_v_spacing;   // Minimum vertical space between gate centers
+    float lane_spacing;         // Space between parallel wires in an alley
 
-    // === WIRE ROUTING ===
-    float wire_spread;          // How much to spread parallel wires
-    float wire_offset_base;     // Base offset for wire waypoints
+    // === PIN LAYOUT ===
+    float input_v_spacing;
+    float output_v_spacing;
+    float pin_margin_x;         // Horizontal distance from first/last column to pins
 
-    // === VISUAL FLOW ===
-    float depth_y_drift;        // Downward drift per depth level (cascade effect)
-    bool center_single_gates;   // Center gates that are alone at their depth
+    // === CHIP SIZING ===
+    float chip_padding;         // Padding around content for chip boundary
 
-    // === CHIP APPEARANCE ===
+    // === APPEARANCE ===
     float chip_color_r;
     float chip_color_g;
     float chip_color_b;
 } LayoutConfig;
 
-// Default configuration - spread out and clear
 static LayoutConfig get_default_layout_config(void) {
-    LayoutConfig cfg = {
-        // Bounds - generous space
-        .y_min = -5.0f,
-        .y_max = 5.0f,
-        .input_x = -9.0f,
-        .output_x = 9.0f,
-        .gate_x_min = -6.0f,
-        .gate_x_max = 6.0f,
+    return (LayoutConfig){
+        .gate_width = 0.85f,
+        .gate_height = 0.55f,
 
-        // Spacing - room to breathe
-        .min_gate_h_spacing = 2.0f,
-        .min_gate_v_spacing = 1.5f,
-        .input_v_spacing = 1.0f,
-        .output_v_spacing = 1.0f,
+        .column_spacing = 5.0f,     // Increased from 3.5 (Wider alleys)
+        .alley_width = 2.8f,        // Increased from 1.8 (More lanes)
+        .min_gate_v_spacing = 3.0f,  // Increased from 1.4 (CRITICAL: Creates space for wires)
+        .lane_spacing = 0.25f,      // Increased from 0.18 (Prevents wire-on-wire blending)
 
-        // Wire routing
-        .wire_spread = 0.15f,
-        .wire_offset_base = 0.5f,
+        .input_v_spacing = 1.5f,
+        .output_v_spacing = 1.5f,
+        .pin_margin_x = 4.5f,
 
-        // Visual flow
-        .depth_y_drift = 0.2f,
-        .center_single_gates = true,
+        .chip_padding = 1.0f,
 
-        // Chip color (blue-ish)
-        .chip_color_r = 0.25f,
-        .chip_color_g = 0.45f,
-        .chip_color_b = 0.70f
+        .chip_color_r = 0.22f, .chip_color_g = 0.32f, .chip_color_b = 0.48f
     };
-    return cfg;
 }
 
 /* ============================================================
- * LAYOUT HELPERS
+ * HELPER FUNCTIONS
  * ============================================================ */
+static float absf(float x) { return (x < 0) ? -x : x; }
+static float minf(float a, float b) { return (a < b) ? a : b; }
+static float maxf(float a, float b) { return (a > b) ? a : b; }
 
 static void calculate_gate_depths(Circuit *c, int *depths) {
     for (int i = 0; i < c->num_gates; i++) {
@@ -1143,21 +1130,151 @@ static int get_max_depth(int *depths, int num_gates) {
     return max_d;
 }
 
-static float absf(float x) { return (x < 0) ? -x : x; }
-static float minf(float a, float b) { return (a < b) ? a : b; }
-static float maxf(float a, float b) { return (a > b) ? a : b; }
+/* ============================================================
+ * GRID POSITION CALCULATOR
+ * Computes column centers and alley centers
+ * ============================================================ */
+typedef struct {
+    float column_x[100];    // X center of each depth column
+    float alley_x[101];     // X center of each routing alley
+    int alley_lane[101];    // Next available lane in each alley
+    float input_x;
+    float output_x;
+    int num_columns;
+    int num_alleys;
+} GridLayout;
+
+static void calculate_grid_layout(int max_depth, LayoutConfig *cfg, GridLayout *grid) {
+    grid->num_columns = max_depth + 1;
+    grid->num_alleys = max_depth + 2;  // One more alley than columns
+
+    // Center the grid around x=0
+    float total_width = max_depth * cfg->column_spacing;
+    float start_x = -total_width / 2.0f;
+
+    // Column centers
+    for (int d = 0; d <= max_depth; d++) {
+        grid->column_x[d] = start_x + d * cfg->column_spacing;
+    }
+
+    // Alley centers (between columns)
+    // Alley[0] = left of column[0] (for inputs)
+    // Alley[d] = between column[d-1] and column[d]
+    // Alley[num_columns] = right of last column (for outputs)
+
+    float half_col_spacing = cfg->column_spacing / 2.0f;
+
+    grid->alley_x[0] = grid->column_x[0] - half_col_spacing;
+    for (int d = 1; d <= max_depth; d++) {
+        grid->alley_x[d] = (grid->column_x[d-1] + grid->column_x[d]) / 2.0f;
+    }
+    grid->alley_x[max_depth + 1] = grid->column_x[max_depth] + half_col_spacing;
+
+    // Initialize lane counters
+    for (int i = 0; i < grid->num_alleys; i++) {
+        grid->alley_lane[i] = 0;
+    }
+
+    // Pin positions
+    grid->input_x = grid->alley_x[0] - cfg->pin_margin_x;
+    grid->output_x = grid->alley_x[grid->num_alleys - 1] + cfg->pin_margin_x;
+}
 
 /* ============================================================
- * WIRE ROUTING WITH CHANNELS
+ * COLLISION-FREE GATE Y POSITIONING
+ * Aligns with Source A, then nudges to avoid overlaps
  * ============================================================ */
-static void write_wire_routed(FILE *f,
-                              int src_pin, int src_owner,
-                              int tgt_pin, int tgt_owner,
-                              float src_x, float src_y,
-                              float tgt_x, float tgt_y,
-                              int wire_index,      // For offset calculation
-                              LayoutConfig *cfg,
-                              bool is_last) {
+static void position_gates_with_collision_avoidance(
+    Circuit *c,
+    int *depths,
+    int max_depth,
+    float *input_y,
+    float *gate_x,
+    float *gate_y,
+    GridLayout *grid,
+    LayoutConfig *cfg
+) {
+    // Track Y positions already used at each depth
+    float used_y[100][50];  // [depth][slot] = y position
+    int used_count[100] = {0};
+
+    // Process gates in order (they should already be topologically sorted)
+    for (int i = 0; i < c->num_gates; i++) {
+        Gate *g = &c->gates[i];
+        int d = depths[i];
+
+        // X position: column center
+        gate_x[i] = grid->column_x[d];
+
+        // Y position: align with Source A (primary input)
+        float target_y;
+        if (g->src_a < c->num_inputs) {
+            target_y = input_y[g->src_a];
+        } else {
+            target_y = gate_y[g->src_a - c->num_inputs];
+        }
+
+        // Check for collisions with existing gates at this depth
+        bool collision = true;
+        float best_y = target_y;
+        float search_offset = 0.0f;
+        int direction = 1;  // Alternate up/down
+
+        while (collision) {
+            collision = false;
+            float test_y = target_y + search_offset * direction;
+
+            for (int j = 0; j < used_count[d]; j++) {
+                if (absf(test_y - used_y[d][j]) < cfg->min_gate_v_spacing) {
+                    collision = true;
+                    break;
+                }
+            }
+
+            if (!collision) {
+                best_y = test_y;
+            } else {
+                // Try the other direction, then increase offset
+                if (direction == 1) {
+                    direction = -1;
+                } else {
+                    direction = 1;
+                    search_offset += cfg->min_gate_v_spacing;
+                }
+
+                // Safety limit
+                if (search_offset > 20.0f) {
+                    best_y = target_y + used_count[d] * cfg->min_gate_v_spacing;
+                    break;
+                }
+            }
+        }
+
+        gate_y[i] = best_y;
+
+        // Record this position
+        if (used_count[d] < 50) {
+            used_y[d][used_count[d]++] = best_y;
+        }
+    }
+}
+
+/* ============================================================
+ * ALLEYWAY WIRE ROUTING
+ * Routes wires through designated alleys between columns
+ * ============================================================ */
+static void write_wire_alleyway(
+    FILE *f,
+    int src_pin, int src_owner,
+    int tgt_pin, int tgt_owner,
+    float src_x, float src_y,
+    float tgt_x, float tgt_y,
+    int src_depth,      // -1 for input, depth for gate
+    int tgt_depth,      // depth for gate, -2 for output
+    GridLayout *grid,
+    LayoutConfig *cfg,
+    bool is_last
+) {
     fprintf(f, "    {\n");
     fprintf(f, "      \"SourcePinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", src_pin, src_owner);
     fprintf(f, "      \"TargetPinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", tgt_pin, tgt_owner);
@@ -1165,26 +1282,57 @@ static void write_wire_routed(FILE *f,
     fprintf(f, "      \"ConnectedWireIndex\":-1,\n");
     fprintf(f, "      \"ConnectedWireSegmentIndex\":-1,\n");
 
-    float dx = tgt_x - src_x;
     float dy = tgt_y - src_y;
+    float dx = tgt_x - src_x;
 
-    // Direct connection for very close or nearly horizontal wires
-    if (absf(dy) < 0.4f && dx < 2.0f) {
+    // Direct connection if very close and nearly horizontal
+    if (absf(dy) < 0.3f && absf(dx) < 1.5f) {
         fprintf(f, "      \"Points\":[{\"x\":0.0,\"y\":0.0},{\"x\":0.0,\"y\":0.0}]\n");
     } else {
-        // Calculate wire channel offset to prevent overlap
-        float channel_offset = cfg->wire_offset_base + (wire_index % 5) * cfg->wire_spread;
+        // Determine which alley to use for the vertical segment
+        // Use the alley immediately LEFT of the target
+        int alley_idx;
 
-        // Alternate direction of offset based on wire index
-        if (wire_index % 2 == 1) channel_offset = -channel_offset;
+        if (src_depth == -1) {
+            // If it's an INPUT, turn vertical in the first alley (Alley 0)
+            // Alley 0 is the space BEFORE the first column of gates.
+            alley_idx = 0;
+        }
+        else if (tgt_depth == -2) {
+            // If it's an OUTPUT, turn vertical in the last alley
+            alley_idx = grid->num_alleys - 1;
+        }
+        else {
+            // If it's gate-to-gate, pick an alley in the middle
+            // This spreads wires out and prevents them from all bunching in one alley
+            alley_idx = (src_depth + tgt_depth + 1) / 2;
+        }
 
-        // L-shaped routing through channel
-        float mid_x = src_x + dx * 0.5f + channel_offset;
+        // Clamp to valid range
+        if (alley_idx < 0) alley_idx = 0;
+        if (alley_idx >= grid->num_alleys) alley_idx = grid->num_alleys - 1;
 
+        // Get lane within alley
+        int lane = grid->alley_lane[alley_idx]++;
+
+        // Calculate lane X offset (center lane at 0, spread outward)
+        float lane_offset = (lane % 2 == 0)
+        ? (float)(lane / 2) * cfg->lane_spacing
+        : -(float)((lane + 1) / 2) * cfg->lane_spacing;
+
+        float alley_center = grid->alley_x[alley_idx];
+        float route_x = alley_center + lane_offset;
+
+        // Ensure route_x doesn't overlap with gate columns
+        // (stay within alley bounds)
+        float half_alley = cfg->alley_width / 2.0f - 0.1f;
+        route_x = maxf(alley_center - half_alley, minf(alley_center + half_alley, route_x));
+
+        // L-shaped route: horizontal to alley, vertical in alley, horizontal to target
         fprintf(f, "      \"Points\":[");
         fprintf(f, "{\"x\":0.0,\"y\":0.0},");
-        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", mid_x, src_y);
-        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", mid_x, tgt_y);
+        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", route_x, src_y);
+        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", route_x, tgt_y);
         fprintf(f, "{\"x\":0.0,\"y\":0.0}]\n");
     }
 
@@ -1192,10 +1340,33 @@ static void write_wire_routed(FILE *f,
 }
 
 /* ============================================================
+ * BOUNDING BOX TRACKER
+ * Tracks min/max coordinates for dynamic chip sizing
+ * ============================================================ */
+typedef struct {
+    float min_x, max_x;
+    float min_y, max_y;
+    bool initialized;
+} BoundingBox;
+
+static void bbox_init(BoundingBox *bb) {
+    bb->min_x = bb->min_y = 1e9f;
+    bb->max_x = bb->max_y = -1e9f;
+    bb->initialized = false;
+}
+
+static void bbox_add_point(BoundingBox *bb, float x, float y, float margin) {
+    bb->min_x = minf(bb->min_x, x - margin);
+    bb->max_x = maxf(bb->max_x, x + margin);
+    bb->min_y = minf(bb->min_y, y - margin);
+    bb->max_y = maxf(bb->max_y, y + margin);
+    bb->initialized = true;
+}
+
+/* ============================================================
  * MAIN EXPORT FUNCTION
  * ============================================================ */
 void render_dls2_json(Circuit *c, GrowthSolver *s) {
-    // Get layout configuration
     LayoutConfig cfg = get_default_layout_config();
 
     // Validate pin mappings
@@ -1220,6 +1391,11 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
     int depths[MAX_GATES];
     calculate_gate_depths(c, depths);
     int max_depth = get_max_depth(depths, c->num_gates);
+    if (c->num_gates == 0) max_depth = 0;
+
+    // === SETUP GRID LAYOUT ===
+    GridLayout grid;
+    calculate_grid_layout(max_depth, &cfg, &grid);
 
     // === ALLOCATE IDs ===
     int input_ids[MAX_INPUTS];
@@ -1230,7 +1406,7 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
     for (int i = 0; i < c->num_outputs; i++) output_ids[i] = 2000 + i;
     for (int i = 0; i < c->num_gates; i++)   gate_ids[i]   = 3000 + i;
 
-    // === INPUT POSITIONS ===
+    // === INPUT Y POSITIONS (centered) ===
     float input_y[MAX_INPUTS];
     float total_input_height = (c->num_inputs - 1) * cfg.input_v_spacing;
     float input_start_y = total_input_height / 2.0f;
@@ -1239,83 +1415,16 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
         input_y[i] = input_start_y - i * cfg.input_v_spacing;
     }
 
-    // === COUNT GATES PER DEPTH ===
-    int count_at_depth[100] = {0};
-    int idx_at_depth[MAX_GATES];
-
-    for (int i = 0; i < c->num_gates; i++) {
-        idx_at_depth[i] = count_at_depth[depths[i]];
-        count_at_depth[depths[i]]++;
-    }
-
-    // Find max gates at any single depth (for spacing calculation)
-    int max_gates_at_depth = 0;
-    for (int d = 0; d <= max_depth; d++) {
-        if (count_at_depth[d] > max_gates_at_depth) {
-            max_gates_at_depth = count_at_depth[d];
-        }
-    }
-
-    // === GATE POSITIONS ===
+    // === GATE POSITIONS (with collision avoidance) ===
     float gate_x[MAX_GATES];
     float gate_y[MAX_GATES];
 
-    // Calculate horizontal spacing
-    float h_spacing = cfg.min_gate_h_spacing;
-    if (max_depth > 0) {
-        float available_width = cfg.gate_x_max - cfg.gate_x_min;
-        float needed_spacing = available_width / (max_depth + 1);
-        h_spacing = maxf(cfg.min_gate_h_spacing, needed_spacing);
-    }
+    position_gates_with_collision_avoidance(
+        c, depths, max_depth, input_y,
+        gate_x, gate_y, &grid, &cfg
+    );
 
-    // Position gates
-    for (int i = 0; i < c->num_gates; i++) {
-        Gate *g = &c->gates[i];
-        int d = depths[i];
-        int idx = idx_at_depth[i];
-        int count = count_at_depth[d];
-
-        // === X POSITION: Based on depth ===
-        gate_x[i] = cfg.gate_x_min + (d + 0.5f) * h_spacing;
-
-        // === Y POSITION ===
-        if (count == 1 && cfg.center_single_gates) {
-            // Single gate: position based on source average
-            float sum_y = 0.0f;
-            int n = 0;
-
-            if (g->src_a < c->num_inputs) {
-                sum_y += input_y[g->src_a];
-            } else {
-                sum_y += gate_y[g->src_a - c->num_inputs];
-            }
-            n++;
-
-            if (g->op != OP_NOT) {
-                if (g->src_b < c->num_inputs) {
-                    sum_y += input_y[g->src_b];
-                } else {
-                    sum_y += gate_y[g->src_b - c->num_inputs];
-                }
-                n++;
-            }
-
-            gate_y[i] = sum_y / n;
-        } else {
-            // Multiple gates: spread evenly with good spacing
-            float col_height = (count - 1) * cfg.min_gate_v_spacing;
-            float col_start_y = col_height / 2.0f;
-            gate_y[i] = col_start_y - idx * cfg.min_gate_v_spacing;
-        }
-
-        // Apply depth drift for visual cascade
-        gate_y[i] -= d * cfg.depth_y_drift;
-
-        // Clamp to bounds with margin
-        gate_y[i] = maxf(cfg.y_min + 0.5f, minf(cfg.y_max - 0.5f, gate_y[i]));
-    }
-
-    // === OUTPUT POSITIONS ===
+    // === OUTPUT Y POSITIONS (centered) ===
     float output_y[MAX_OUTPUTS];
     float total_output_height = (c->num_outputs - 1) * cfg.output_v_spacing;
     float output_start_y = total_output_height / 2.0f;
@@ -1324,18 +1433,44 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
         output_y[i] = output_start_y - i * cfg.output_v_spacing;
     }
 
-    // === CHIP SIZE ===
-    int max_pins = (c->num_inputs > c->num_outputs) ? c->num_inputs : c->num_outputs;
+    // === CALCULATE BOUNDING BOX ===
+    BoundingBox bbox;
+    bbox_init(&bbox);
 
-    float chip_height = 0.5f;
-    if (max_pins > 2) chip_height += (max_pins - 2) * 0.35f;
-    if (max_gates_at_depth > 3) chip_height += (max_gates_at_depth - 3) * 0.2f;
-    chip_height = minf(chip_height, 3.0f);
+    // Add inputs
+    for (int i = 0; i < c->num_inputs; i++) {
+        bbox_add_point(&bbox, grid.input_x, input_y[i], 0.3f);
+    }
 
-    float chip_width = 0.725f;
-    if (max_depth > 2) chip_width += (max_depth - 2) * 0.15f;
-    if (c->num_gates > 8) chip_width += (c->num_gates - 8) * 0.03f;
-    chip_width = minf(chip_width, 2.5f);
+    // Add outputs
+    for (int i = 0; i < c->num_outputs; i++) {
+        bbox_add_point(&bbox, grid.output_x, output_y[i], 0.3f);
+    }
+
+    // Add gates (with physical size)
+    for (int i = 0; i < c->num_gates; i++) {
+        bbox_add_point(&bbox, gate_x[i], gate_y[i], cfg.gate_width / 2.0f + 0.2f);
+    }
+
+    // Add alleys (for wire routing space)
+    for (int i = 0; i < grid.num_alleys; i++) {
+        float alley_y_extent = maxf(absf(bbox.min_y), absf(bbox.max_y));
+        bbox_add_point(&bbox, grid.alley_x[i], alley_y_extent, 0.1f);
+        bbox_add_point(&bbox, grid.alley_x[i], -alley_y_extent, 0.1f);
+    }
+
+    // === CALCULATE DYNAMIC CHIP SIZE ===
+    float content_width = bbox.max_x - bbox.min_x;
+    float content_height = bbox.max_y - bbox.min_y;
+
+    // Chip size formula: content dimensions mapped to chip scale
+    // DLS2 uses a specific ratio. The "Size" field is roughly the visual size.
+    float chip_width = (content_width / 12.0f) + cfg.chip_padding;
+    float chip_height = (content_height / 8.0f) + cfg.chip_padding;
+
+    // Clamp to reasonable bounds
+    chip_width = maxf(0.5f, minf(chip_width, 4.0f));
+    chip_height = maxf(0.5f, minf(chip_height, 4.0f));
 
     // === JSON OUTPUT ===
     fprintf(f, "{\n");
@@ -1353,7 +1488,7 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
         fprintf(f, "    {\n");
         fprintf(f, "      \"Name\":\"IN%d\",\n", i);
         fprintf(f, "      \"ID\":%d,\n", input_ids[i]);
-        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", cfg.input_x, input_y[i]);
+        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", grid.input_x, input_y[i]);
         fprintf(f, "      \"BitCount\":1,\n");
         fprintf(f, "      \"Colour\":0,\n");
         fprintf(f, "      \"ValueDisplayMode\":0\n");
@@ -1367,7 +1502,7 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
         fprintf(f, "    {\n");
         fprintf(f, "      \"Name\":\"OUT%d\",\n", i);
         fprintf(f, "      \"ID\":%d,\n", output_ids[i]);
-        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", cfg.output_x, output_y[i]);
+        fprintf(f, "      \"Position\":{\"x\":%.4f,\"y\":%.4f},\n", grid.output_x, output_y[i]);
         fprintf(f, "      \"BitCount\":1,\n");
         fprintf(f, "      \"Colour\":0,\n");
         fprintf(f, "      \"ValueDisplayMode\":0\n");
@@ -1397,64 +1532,73 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
         total_wires += (c->gates[i].op == OP_NOT) ? 1 : 2;
     }
 
-    // --- Wires ---
+    // --- Wires (with alleyway routing) ---
     fprintf(f, "  \"Wires\":[\n");
     int wire_num = 0;
 
     // Gate input wires
     for (int i = 0; i < c->num_gates; i++) {
         Gate *g = &c->gates[i];
+        int tgt_depth = depths[i];
 
-        // Wire A
+        // Wire A (primary input)
         int src_a = g->src_a;
         float sx_a, sy_a;
         int pin_a, owner_a;
+        int src_depth_a;
 
         if (src_a < c->num_inputs) {
-            sx_a = cfg.input_x;
+            sx_a = grid.input_x;
             sy_a = input_y[src_a];
             pin_a = 0;
             owner_a = input_ids[src_a];
+            src_depth_a = -1;  // Input marker
         } else {
             int idx = src_a - c->num_inputs;
             sx_a = gate_x[idx];
             sy_a = gate_y[idx];
             pin_a = DLS2_PIN_MAP[c->gates[idx].op].output;
             owner_a = gate_ids[idx];
+            src_depth_a = depths[idx];
         }
 
         wire_num++;
-        write_wire_routed(f, pin_a, owner_a,
-                          DLS2_PIN_MAP[g->op].input_a, gate_ids[i],
-                          sx_a, sy_a, gate_x[i], gate_y[i],
-                          wire_num, &cfg,
-                          wire_num == total_wires);
+        write_wire_alleyway(f, pin_a, owner_a,
+                            DLS2_PIN_MAP[g->op].input_a, gate_ids[i],
+                            sx_a, sy_a, gate_x[i], gate_y[i],
+                            src_depth_a, tgt_depth,
+                            &grid, &cfg,
+                            wire_num == total_wires);
 
-        // Wire B (if not NOT gate)
+        // Wire B (secondary input, if not NOT gate)
         if (g->op != OP_NOT) {
             int src_b = g->src_b;
             float sx_b, sy_b;
             int pin_b, owner_b;
+            int src_depth_b;
 
             if (src_b < c->num_inputs) {
-                sx_b = cfg.input_x;
+                sx_b = grid.input_x;
                 sy_b = input_y[src_b];
                 pin_b = 0;
                 owner_b = input_ids[src_b];
+                src_depth_b = -1;
             } else {
                 int idx = src_b - c->num_inputs;
                 sx_b = gate_x[idx];
                 sy_b = gate_y[idx];
                 pin_b = DLS2_PIN_MAP[c->gates[idx].op].output;
                 owner_b = gate_ids[idx];
+                src_depth_b = depths[idx];
             }
 
             wire_num++;
-            write_wire_routed(f, pin_b, owner_b,
-                              DLS2_PIN_MAP[g->op].input_b, gate_ids[i],
-                              sx_b, sy_b, gate_x[i], gate_y[i],
-                              wire_num, &cfg,
-                              wire_num == total_wires);
+            write_wire_alleyway(f, pin_b, owner_b,
+                                DLS2_PIN_MAP[g->op].input_b, gate_ids[i],
+                                sx_b, sy_b, gate_x[i], gate_y[i],
+                                src_depth_b, tgt_depth,
+                                &grid, &cfg,
+                                wire_num == total_wires);
         }
     }
 
@@ -1463,25 +1607,29 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
         int src = c->output_map[i];
         float sx, sy;
         int pin, owner;
+        int src_depth;
 
         if (src < c->num_inputs) {
-            sx = cfg.input_x;
+            sx = grid.input_x;
             sy = input_y[src];
             pin = 0;
             owner = input_ids[src];
+            src_depth = -1;
         } else {
             int idx = src - c->num_inputs;
             sx = gate_x[idx];
             sy = gate_y[idx];
             pin = DLS2_PIN_MAP[c->gates[idx].op].output;
             owner = gate_ids[idx];
+            src_depth = depths[idx];
         }
 
         wire_num++;
-        write_wire_routed(f, pin, owner, 0, output_ids[i],
-                          sx, sy, cfg.output_x, output_y[i],
-                          wire_num, &cfg,
-                          wire_num == total_wires);
+        write_wire_alleyway(f, pin, owner, 0, output_ids[i],
+                            sx, sy, grid.output_x, output_y[i],
+                            src_depth, -2,  // -2 = output marker
+                            &grid, &cfg,
+                            wire_num == total_wires);
     }
 
     fprintf(f, "  ],\n");
@@ -1490,16 +1638,20 @@ void render_dls2_json(Circuit *c, GrowthSolver *s) {
 
     fclose(f);
 
-    // Print summary
+    // === PRINT SUMMARY ===
     printf("\n");
-    printf("╔══════════════════════════════════════════╗\n");
-    printf("║         DLS2 EXPORT COMPLETE             ║\n");
-    printf("╠══════════════════════════════════════════╣\n");
-    printf("║  File: %-32s ║\n", filename);
-    printf("║  Chip: %.2f x %.2f                       ║\n", chip_width, chip_height);
-    printf("║  Gates: %-3d  Depths: %-3d  Wires: %-3d    ║\n",
+    printf("╔═══════════════════════════════════════════════════╗\n");
+    printf("║       DLS2 GRID MANHATTAN ROUTING EXPORT          ║\n");
+    printf("╠═══════════════════════════════════════════════════╣\n");
+    printf("║  File: %-41s ║\n", filename);
+    printf("║  Chip Size: %.2f x %.2f                           ║\n", chip_width, chip_height);
+    printf("║  Gates: %-3d    Depths: %-3d    Wires: %-3d          ║\n",
            c->num_gates, max_depth + 1, total_wires);
-    printf("╚══════════════════════════════════════════╝\n");
+    printf("║  Columns: %-2d   Alleys: %-2d                         ║\n",
+           grid.num_columns, grid.num_alleys);
+    printf("║  Bounds: X[%.1f, %.1f]  Y[%.1f, %.1f]             ║\n",
+           bbox.min_x, bbox.max_x, bbox.min_y, bbox.max_y);
+    printf("╚═══════════════════════════════════════════════════╝\n");
 
     update_project_description(DLS2_CHIP_NAME);
 }
@@ -1508,12 +1660,12 @@ int main() {
     seed_rng(time(NULL));
     load_dls2_pin_mappings();
     // input truth table separated by spaces i.e. "00:0 01:1 10:1 11:0"
-    const char *tt =
+    const char *tt = 
         "0000:1111110 0001:0110000 0010:1101101 0011:1111001 "
         "0100:0110011 0101:1011011 0110:1011111 0111:1110000 "
         "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
-        "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX";
-
+        "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX"; 
+    
     // Separated by space you can specify allowed gates to be used "ALL" or "NOR XOR OR XNOR NAND AND NOT" or any combination of allowing.
     GrowthSolver solver;
     solver_init(&solver, tt, "ALL");
