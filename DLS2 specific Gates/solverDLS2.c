@@ -346,7 +346,8 @@ void solver_init(GrowthSolver *s, const char *tt_str, const char *allowed_gates_
     strncpy(tt_copy, tt_str, sizeof(tt_copy) - 1);
     tt_copy[sizeof(tt_copy) - 1] = '\0';
     char *saveptr;
-    char *row_str = strtok_r(tt_copy, " ", &saveptr);
+    // NEW: Includes Space, Newline, Carriage Return, and Tab
+    char *row_str = strtok_r(tt_copy, " \n\r\t", &saveptr);
 
     memset(s->inputs_bin, 0, sizeof(s->inputs_bin));
     memset(s->targets_bin, 0, sizeof(s->targets_bin));
