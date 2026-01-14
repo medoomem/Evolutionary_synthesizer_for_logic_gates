@@ -28,7 +28,7 @@ You need a C compiler (GCC, Clang, or MSVC).
 Compile with high optimization flags for the best performance (essential for bitwise operations):
 
 ```bash
-gcc -O3 solver.c -o solver
+gcc -O3 -march=native solver.c -o solver
 ```
 
 ### Running
