@@ -102,18 +102,43 @@ typedef struct {
 /* --- Core Logic --- */
 
 // UPGRADE: Multi-word logic evaluation
+// UPGRADE: Multi-word logic evaluation
 void run_gate_vec(int op_id, const BitVec *val_a, const BitVec *val_b, BitVec *result, int num_chunks) {
-    for (int c = 0; c < num_chunks; c++) {
-        switch (op_id) {
-            case OP_AND:  result->chunks[c] = val_a->chunks[c] & val_b->chunks[c]; break;
-            case OP_OR:   result->chunks[c] = val_a->chunks[c] | val_b->chunks[c]; break;
-            case OP_NAND: result->chunks[c] = ~(val_a->chunks[c] & val_b->chunks[c]); break;
-            case OP_NOR:  result->chunks[c] = ~(val_a->chunks[c] | val_b->chunks[c]); break;
-            case OP_XOR:  result->chunks[c] = val_a->chunks[c] ^ val_b->chunks[c]; break;
-            case OP_NOT:  result->chunks[c] = ~val_a->chunks[c]; break;
-            case OP_XNOR: result->chunks[c] = ~(val_a->chunks[c] ^ val_b->chunks[c]); break;
-            default:      result->chunks[c] = 0; break;
-        }
+    // Optimization: Switch FIRST, then Loop.
+    // This allows the CPU to process the array in one continuous burst.
+    switch (op_id) {
+        case OP_AND:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = val_a->chunks[c] & val_b->chunks[c];
+        break;
+        case OP_OR:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = val_a->chunks[c] | val_b->chunks[c];
+        break;
+        case OP_NAND:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = ~(val_a->chunks[c] & val_b->chunks[c]);
+        break;
+        case OP_NOR:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = ~(val_a->chunks[c] | val_b->chunks[c]);
+        break;
+        case OP_XOR:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = val_a->chunks[c] ^ val_b->chunks[c];
+        break;
+        case OP_NOT:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = ~val_a->chunks[c];
+        break;
+        case OP_XNOR:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = ~(val_a->chunks[c] ^ val_b->chunks[c]);
+        break;
+        default:
+            for (int c = 0; c < num_chunks; c++)
+                result->chunks[c] = 0;
+        break;
     }
 }
 
