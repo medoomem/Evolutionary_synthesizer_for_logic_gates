@@ -45,7 +45,7 @@
 #define MAX_INPUTS 32
 #define MAX_OUTPUTS 64
 
-#define STALL_LIMIT 50000              
+#define STALL_LIMIT 5000              
 
 
 #define CONST_ZERO -1
