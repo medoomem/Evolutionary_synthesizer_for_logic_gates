@@ -7,28 +7,21 @@
 #include <math.h>
 
 
-
-
-
-
-
-
-
 /* ============================================================
  * USER CONFIGURATION
  * ============================================================ */
 
 /* Set to 1 to enable, 0 to disable */
 
-#define ENABLE_EVOLUTIONARY_REFINEMENT  0    /* Run CGP optimization after synthesis */
+#define ENABLE_EVOLUTIONARY_REFINEMENT  1    /* Run CGP optimization after synthesis */
 #define ENABLE_STRUCTURAL_DETECTION     1    /* Try pattern detection before AIG */
 #define ENABLE_TECHNOLOGY_MAPPING       1    /* Convert to allowed gate set */
 #define ENABLE_DLS2_EXPORT              1    /* Export JSON for Digital Logic Sim 2 */
 #define ENABLE_NETLIST_PRINT            0    /* Print circuit netlist to console */
 
 /* Evolution parameters (only used if ENABLE_EVOLUTIONARY_REFINEMENT = 1) */
-#define EVO_MAX_GENERATIONS         5000000  /* Max generations before timeout */
-#define EVO_TERMINATION_PLATEAU     2000000  /* Stop if no improvement for this many gens */
+#define EVO_MAX_GENERATIONS         100000  /* Max generations before timeout */
+#define EVO_TERMINATION_PLATEAU     10000  /* Stop if no improvement for this many gens */
 #define EVO_KICK_THRESHOLD          200000   /* Generations before soft kick */
 #define EVO_PRINT_INTERVAL          500000   /* Progress print frequency */
 
@@ -2266,7 +2259,7 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
     bool found_perfect = seed_is_perfect;
     double rewire_prob_local = 0.05;
     
-    const int MAX_GENS = 500000;
+    const int MAX_GENS = EVO_MAX_GENERATIONS;
     
     while(gen < MAX_GENS) {
         gen++;
@@ -2303,7 +2296,7 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
                 }
             }
             
-            if (gens_since_gate_imp > 100000) {
+            if (gens_since_gate_imp > EVO_TERMINATION_PLATEAU) {
                 printf("    Converged at %d gates after %d generations.\n", best_active, gen);
                 break;
             }
