@@ -24,7 +24,7 @@
 #define ENABLE_STRUCTURAL_DETECTION     1    /* Try pattern detection before AIG */
 #define ENABLE_TECHNOLOGY_MAPPING       1    /* Convert to allowed gate set */
 #define ENABLE_DLS2_EXPORT              1    /* Export JSON for Digital Logic Sim 2 */
-#define ENABLE_NETLIST_PRINT            1    /* Print circuit netlist to console */
+#define ENABLE_NETLIST_PRINT            0    /* Print circuit netlist to console */
 
 /* Evolution parameters (only used if ENABLE_EVOLUTIONARY_REFINEMENT = 1) */
 #define EVO_MAX_GENERATIONS         5000000  /* Max generations before timeout */
@@ -189,9 +189,9 @@ typedef struct {
 } LayoutConfig;
 
 typedef struct {
-    float column_x[100];
-    float alley_x[101];
-    int alley_lane[101];
+    float column_x[500];      // Increased from 100
+    float alley_x[501];       // Increased from 101
+    int alley_lane[501];      // Increased from 101
     float input_x;
     float output_x;
     int num_columns;
@@ -1610,7 +1610,13 @@ void load_evolutionary_from_gates(Circuit *dest) {
     memcpy(dest->allowed_ops, g_allowed_ops, sizeof(g_allowed_ops));
     dest->dead_count = 0;
     
-    int remap[MAX_GATES];
+    /* FIX: Heap allocation instead of int remap[MAX_GATES] which is 2MB! */
+    int *remap = (int*)malloc(sizeof(int) * MAX_GATES);
+    if (!remap) {
+        printf("[!] Memory allocation failed in load_evolutionary_from_gates\n");
+        return;
+    }
+    
     for(int i = 0; i < MAX_GATES; i++) remap[i] = -999;
     for(int i = 0; i < num_inputs; i++) remap[i] = i;
     
@@ -1654,11 +1660,11 @@ void load_evolutionary_from_gates(Circuit *dest) {
                 else if (val_b == 0) { remap[i] = wire_a; folded = true; }
                 else if (val_a == 1 && val_b == 1) { remap[i] = CONST_ZERO; folded = true; }
                 else if (val_a == 1 && wire_b >= 0) {
-                    dest->gates[dest->num_gates] = (Gate){EVO_NOT, (int16_t)wire_b, 0, true};
+                    dest->gates[dest->num_gates] = (Gate){EVO_NOT, (int32_t)wire_b, 0, true};
                     remap[i] = num_inputs + dest->num_gates++;
                     folded = true;
                 } else if (val_b == 1 && wire_a >= 0) {
-                    dest->gates[dest->num_gates] = (Gate){EVO_NOT, (int16_t)wire_a, 0, true};
+                    dest->gates[dest->num_gates] = (Gate){EVO_NOT, (int32_t)wire_a, 0, true};
                     remap[i] = num_inputs + dest->num_gates++;
                     folded = true;
                 }
@@ -1669,7 +1675,7 @@ void load_evolutionary_from_gates(Circuit *dest) {
                 uint8_t evo_op = (g.op == G_AND) ? EVO_AND : (g.op == G_OR) ? EVO_OR :
                                  (g.op == G_XOR) ? EVO_XOR : (g.op == G_NOT) ? EVO_NOT : 255;
                 if (evo_op == 255) continue;
-                dest->gates[dest->num_gates] = (Gate){evo_op, (int16_t)wire_a, (int16_t)wire_b, true};
+                dest->gates[dest->num_gates] = (Gate){evo_op, (int32_t)wire_a, (int32_t)wire_b, true};
                 remap[i] = num_inputs + dest->num_gates++;
                 changed = true;
             }
@@ -1685,7 +1691,7 @@ void load_evolutionary_from_gates(Circuit *dest) {
         else if (wire == CONST_ONE) {
             dest->gates[dest->num_gates] = (Gate){EVO_NOT, 0, 0, true};
             int not_idx = dest->num_gates++;
-            dest->gates[dest->num_gates] = (Gate){EVO_OR, 0, (int16_t)(num_inputs + not_idx), true};
+            dest->gates[dest->num_gates] = (Gate){EVO_OR, 0, (int32_t)(num_inputs + not_idx), true};
             wire = num_inputs + dest->num_gates++;
         } else if (wire < 0) {
             printf("    [ERROR] Output %d unresolved (wire=%d)!\n", i, wire);
@@ -1693,6 +1699,8 @@ void load_evolutionary_from_gates(Circuit *dest) {
         }
         dest->output_map[i] = wire;
     }
+    
+    free(remap);  /* FIX: Free heap allocation */
 }
 
 /* ============================================================
@@ -2224,22 +2232,34 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
             max_score += __builtin_popcountll(masks[i].chunks[ch]);
     printf("    Target Score: %d\n", max_score);
 
-    Circuit parent = *best_circuit; 
-    int parent_score = evo_get_score(&parent, inputs, targets, masks, num_chunks_param);
-    printf("    Seed Score: %d / %d (Gates: %d)\n", parent_score, max_score, parent.num_gates);
+    /* FIX: Heap allocate Circuit structs (each is ~2-3MB!) */
+    Circuit *parent = (Circuit*)malloc(sizeof(Circuit));
+    Circuit *child = (Circuit*)malloc(sizeof(Circuit));
+    
+    if (!parent || !child) {
+        printf("[!] Memory allocation failed in evolutionary refinement\n");
+        if (parent) free(parent);
+        if (child) free(child);
+        return;
+    }
+    
+    memcpy(parent, best_circuit, sizeof(Circuit));
+    
+    int parent_score = evo_get_score(parent, inputs, targets, masks, num_chunks_param);
+    printf("    Seed Score: %d / %d (Gates: %d)\n", parent_score, max_score, parent->num_gates);
 
     bool seed_is_perfect = (parent_score == max_score);
     
     if (seed_is_perfect) {
         printf("    [*] Running initial deep pruning...\n");
-        int removed = evo_deep_prune(&parent, inputs, targets, masks, num_chunks_param, max_score);
-        if (removed > 0) printf("    -> Removed %d gates, now %d\n", removed, parent.num_gates);
-        *best_circuit = parent;
+        int removed = evo_deep_prune(parent, inputs, targets, masks, num_chunks_param, max_score);
+        if (removed > 0) printf("    -> Removed %d gates, now %d\n", removed, parent->num_gates);
+        memcpy(best_circuit, parent, sizeof(Circuit));
     }
     
     int best_score = parent_score;
-    int best_active = circuit_count_active(&parent);
-    *best_circuit = parent;
+    int best_active = circuit_count_active(parent);
+    memcpy(best_circuit, parent, sizeof(Circuit));
     
     int gens_since_gate_imp = 0;
     int gen = 0;
@@ -2252,30 +2272,34 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
         gen++;
         gens_since_gate_imp++;
         
-        Circuit child = parent;
+        memcpy(child, parent, sizeof(Circuit));
         int num_muts = (rand_double() < 0.85) ? 1 : randint(2, 4);
-        for (int i = 0; i < num_muts; i++) circuit_mutate(&child, rewire_prob_local);
+        for (int i = 0; i < num_muts; i++) circuit_mutate(child, rewire_prob_local);
         
-        int child_score = evo_get_score(&child, inputs, targets, masks, num_chunks_param);
+        int child_score = evo_get_score(child, inputs, targets, masks, num_chunks_param);
         
         if (found_perfect) {
             if (child_score == max_score) {
-                parent = child;
+                memcpy(parent, child, sizeof(Circuit));
                 
-                Circuit temp = parent;
-                circuit_compact(&temp);
-                if (temp.num_gates < best_active) {
-                    best_active = temp.num_gates;
-                    *best_circuit = temp;
-                    gens_since_gate_imp = 0;
-                    printf("    Gen %d: NEW BEST! %d gates.\n", gen, best_active);
-                    
-                    int removed = evo_deep_prune(best_circuit, inputs, targets, masks, num_chunks_param, max_score);
-                    if (removed > 0) {
-                        best_active = best_circuit->num_gates;
-                        printf("    -> Deep pruned: %d gates\n", best_active);
+                Circuit *temp = (Circuit*)malloc(sizeof(Circuit));
+                if (temp) {
+                    memcpy(temp, parent, sizeof(Circuit));
+                    circuit_compact(temp);
+                    if (temp->num_gates < best_active) {
+                        best_active = temp->num_gates;
+                        memcpy(best_circuit, temp, sizeof(Circuit));
+                        gens_since_gate_imp = 0;
+                        printf("    Gen %d: NEW BEST! %d gates.\n", gen, best_active);
+                        
+                        int removed = evo_deep_prune(best_circuit, inputs, targets, masks, num_chunks_param, max_score);
+                        if (removed > 0) {
+                            best_active = best_circuit->num_gates;
+                            printf("    -> Deep pruned: %d gates\n", best_active);
+                        }
+                        memcpy(parent, best_circuit, sizeof(Circuit));
                     }
-                    parent = *best_circuit;
+                    free(temp);
                 }
             }
             
@@ -2285,12 +2309,12 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
             }
         } else {
             if (child_score > parent_score) {
-                parent = child;
+                memcpy(parent, child, sizeof(Circuit));
                 parent_score = child_score;
                 
                 if (child_score > best_score) {
                     best_score = child_score;
-                    *best_circuit = child;
+                    memcpy(best_circuit, child, sizeof(Circuit));
                     circuit_compact(best_circuit);
                     best_active = best_circuit->num_gates;
                     printf("    Gen %d: Score %d/%d (%d gates)\n", gen, best_score, max_score, best_active);
@@ -2299,25 +2323,25 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
                 if (child_score == max_score) {
                     found_perfect = true;
                     printf("    Gen %d: PERFECT SOLUTION FOUND!\n", gen);
-                    circuit_compact(&parent);
-                    best_active = parent.num_gates;
-                    *best_circuit = parent;
+                    circuit_compact(parent);
+                    best_active = parent->num_gates;
+                    memcpy(best_circuit, parent, sizeof(Circuit));
                     
                     int removed = evo_deep_prune(best_circuit, inputs, targets, masks, num_chunks_param, max_score);
                     if (removed > 0) {
                         best_active = best_circuit->num_gates;
                         printf("    -> Deep pruned: %d gates\n", best_active);
                     }
-                    parent = *best_circuit;
+                    memcpy(parent, best_circuit, sizeof(Circuit));
                     gens_since_gate_imp = 0;
                 }
             }
             
             if (gens_since_gate_imp > STALL_LIMIT) {
-                parent = *best_circuit;
+                memcpy(parent, best_circuit, sizeof(Circuit));
                 parent_score = best_score;
-                circuit_add_random_gate(&parent);
-                parent_score = evo_get_score(&parent, inputs, targets, masks, num_chunks_param);
+                circuit_add_random_gate(parent);
+                parent_score = evo_get_score(parent, inputs, targets, masks, num_chunks_param);
                 gens_since_gate_imp = 0;
             }
         }
@@ -2328,6 +2352,10 @@ void run_evolutionary_refinement(BitVec *inputs, BitVec *targets, BitVec *masks,
     }
     
     printf("    Final: %d gates\n", best_circuit->num_gates);
+    
+    /* FIX: Free heap allocations */
+    free(parent);
+    free(child);
 }
 
 /* ============================================================
@@ -2427,48 +2455,35 @@ static bool load_gate_pins_from_file(int op_index, const char* filename) {
     json[size] = '\0';
     fclose(f);
 
-    bool success = false;
-    const char* input_section = NULL;
-    const char* output_section = NULL;
-    const char* id_pos = NULL;
-    const char* second_id = NULL;
+    // We look specifically for the start of the Pins arrays to avoid 
+    // picking up IDs from the Chip size or coordinates
+    const char* input_section = strstr(json, "\"InputPins\"");
+    const char* output_section = strstr(json, "\"OutputPins\"");
+    
+    if (!input_section || !output_section) {
+        free(json);
+        return false;
+    }
 
-    input_section = find_json_key(json, "InputPins");
-    if (!input_section) goto cleanup;
+    // Find first Input ID
+    const char* p = strstr(input_section, "\"ID\"");
+    if (p && p < output_section) DLS2_PIN_MAP[op_index].input_a = extract_int(p + 4);
 
-    output_section = find_json_key(json, "OutputPins");
-    if (!output_section) goto cleanup;
-
-    id_pos = strstr(input_section, "\"ID\"");
-    if (!id_pos || id_pos > output_section) goto cleanup;
-    id_pos = find_json_key(id_pos, "ID");
-    if (!id_pos) goto cleanup;
-    DLS2_PIN_MAP[op_index].input_a = extract_int(id_pos);
-
+    // Find second Input ID (for non-NOT gates)
     if (op_index != EVO_NOT) {
-        second_id = strstr(id_pos + 1, "\"ID\"");
-        if (second_id && second_id < output_section) {
-            second_id = find_json_key(second_id, "ID");
-            if (second_id) {
-                DLS2_PIN_MAP[op_index].input_b = extract_int(second_id);
-            }
-        }
+        p = strstr(p + 4, "\"ID\"");
+        if (p && p < output_section) DLS2_PIN_MAP[op_index].input_b = extract_int(p + 4);
     } else {
         DLS2_PIN_MAP[op_index].input_b = -1;
     }
 
-    id_pos = strstr(output_section, "\"ID\"");
-    if (!id_pos) goto cleanup;
-    id_pos = find_json_key(id_pos, "ID");
-    if (!id_pos) goto cleanup;
-    DLS2_PIN_MAP[op_index].output = extract_int(id_pos);
+    // Find Output ID
+    p = strstr(output_section, "\"ID\"");
+    if (p) DLS2_PIN_MAP[op_index].output = extract_int(p + 4);
 
-    DLS2_PIN_MAP[op_index].loaded = true;
-    success = true;
-
-cleanup:
     free(json);
-    return success;
+    DLS2_PIN_MAP[op_index].loaded = true;
+    return true;
 }
 
 void load_dls2_pin_mappings(void) {
@@ -2587,8 +2602,21 @@ static void position_gates_with_collision_avoidance(
     GridLayout *grid,
     LayoutConfig *cfg
 ) {
-    float used_y[100][50];
-    int used_count[100] = {0};
+    /* FIX: Dynamic allocation based on actual depth count */
+    int num_cols = max_depth + 1;
+    int max_per_col = 100;  /* Max gates expected per column */
+    
+    float *used_y = (float*)calloc((size_t)num_cols * max_per_col, sizeof(float));
+    int *used_count = (int*)calloc(num_cols, sizeof(int));
+    
+    if (!used_y || !used_count) {
+        printf("[!] Allocation failed in position_gates\n");
+        if (used_y) free(used_y);
+        if (used_count) free(used_count);
+        return;
+    }
+    
+    #define USED_Y(col, idx) used_y[(col) * max_per_col + (idx)]
 
     for (int i = 0; i < c->num_gates; i++) {
         if (!c->gates[i].alive) {
@@ -2618,8 +2646,8 @@ static void position_gates_with_collision_avoidance(
             collision = false;
             float test_y = target_y + search_offset * direction;
 
-            for (int j = 0; j < used_count[d]; j++) {
-                if (absf(test_y - used_y[d][j]) < cfg->min_gate_v_spacing) {
+            for (int j = 0; j < used_count[d] && j < max_per_col; j++) {
+                if (absf(test_y - USED_Y(d, j)) < cfg->min_gate_v_spacing) {
                     collision = true;
                     break;
                 }
@@ -2635,7 +2663,7 @@ static void position_gates_with_collision_avoidance(
                     search_offset += cfg->min_gate_v_spacing;
                 }
 
-                if (search_offset > 20.0f) {
+                if (search_offset > 50.0f) {
                     best_y = target_y + used_count[d] * cfg->min_gate_v_spacing;
                     break;
                 }
@@ -2644,10 +2672,15 @@ static void position_gates_with_collision_avoidance(
 
         gate_y[i] = best_y;
 
-        if (used_count[d] < 50) {
-            used_y[d][used_count[d]++] = best_y;
+        if (used_count[d] < max_per_col) {
+            USED_Y(d, used_count[d]) = best_y;
+            used_count[d]++;
         }
     }
+    
+    #undef USED_Y
+    free(used_y);
+    free(used_count);
 }
 
 static void bbox_init(BoundingBox *bb) {
