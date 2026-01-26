@@ -13,7 +13,7 @@
 
 /* Set to 1 to enable, 0 to disable */
 
-#define ENABLE_EVOLUTIONARY_REFINEMENT  1    /* Run CGP optimization after synthesis */
+#define ENABLE_EVOLUTIONARY_REFINEMENT  0    /* Run CGP optimization after synthesis */
 #define ENABLE_STRUCTURAL_DETECTION     1    /* Try pattern detection before AIG */
 #define ENABLE_TECHNOLOGY_MAPPING       1    /* Convert to allowed gate set */
 #define ENABLE_DLS2_EXPORT              1    /* Export JSON for Digital Logic Sim 2 */
@@ -26,7 +26,7 @@
 #define EVO_PRINT_INTERVAL          500000   /* Progress print frequency */
 
 /* Anthropic: Configure chip name here or leave as "SYNTH" */
-#define DEFAULT_CHIP_NAME           "SYNTH"
+#define DEFAULT_CHIP_NAME           "MDM"
 
 
 
@@ -4414,73 +4414,33 @@ bool detect_priority_encoder(TT **outputs, int n_in, int n_out) {
     return true;
 }
 
-void build_priority_encoder(Circuit *c, int n_bits) {
-    int index_bits = 0;
-    while ((1 << index_bits) < n_bits) index_bits++;
-    bool has_valid = (c->num_outputs == index_bits + 1);
+void build_priority_encoder_gen(Circuit *c, int n_in) {
+    int out_bits = 0;
+    while ((1 << out_bits) < n_in) out_bits++;
     
-    /* Valid signal: OR of all inputs */
-    int valid;
-    if (n_bits == 1) {
-        valid = 0;
-    } else {
-        valid = circuit_add_gate_alive(c, EVO_OR, 0, 1);
-        for (int i = 2; i < n_bits; i++) {
-            valid = circuit_add_gate_alive(c, EVO_OR, valid, i);
-        }
+    // 1. Generate "Higher Bits Active" signals
+    int *higher_active = (int*)malloc(sizeof(int) * n_in);
+    higher_active[0] = -1; // MSB always has priority
+    
+    int running_or = 0; // Input 0
+    for (int i = 1; i < n_in; i++) {
+        higher_active[i] = circuit_add_gate_alive(c, EVO_NOT, running_or, 0);
+        running_or = circuit_add_gate_alive(c, EVO_OR, running_or, i);
     }
-    
-    if (has_valid) {
-        c->output_map[index_bits] = valid;
-    }
-    
-    /* For each output bit, determine when it should be 1 */
-    /* Input 0 is highest priority (MSB), input n-1 is lowest */
-    
-    /* Create "no higher priority" signals */
-    int no_higher[16];
-    no_higher[0] = -1;  /* Input 0 has no higher priority input */
-    for (int i = 1; i < n_bits; i++) {
-        int higher_or = 0;
-        for (int j = 0; j < i; j++) {
-            if (j == 0) {
-                higher_or = j;
-            } else {
-                higher_or = circuit_add_gate_alive(c, EVO_OR, higher_or, j);
+
+    // 2. Binary Encoding logic
+    for (int b = 0; b < out_bits; b++) {
+        int term = -1;
+        for (int i = 0; i < n_in; i++) {
+            if ((i >> b) & 1) { // Error check: Ensure logic matches MSB/LSB convention
+                int bit_val = (higher_active[i] == -1) ? i : circuit_add_gate_alive(c, EVO_AND, i, higher_active[i]);
+                if (term == -1) term = bit_val;
+                else term = circuit_add_gate_alive(c, EVO_OR, term, bit_val);
             }
         }
-        no_higher[i] = circuit_add_gate_alive(c, EVO_NOT, higher_or, 0);
+        c->output_map[out_bits - 1 - b] = (term == -1) ? circuit_add_gate_alive(c, EVO_XOR, 0, 0) : term;
     }
-    
-    /* For each bit position in output */
-    for (int bit = 0; bit < index_bits; bit++) {
-        int result = -1;
-        
-        for (int i = 0; i < n_bits; i++) {
-            /* Does input i contribute a 1 to this output bit? */
-            if ((i >> bit) & 1) {
-                /* Input i is active AND no higher priority input is active */
-                int contrib;
-                if (no_higher[i] == -1) {
-                    contrib = i;  /* Input 0 always wins if active */
-                } else {
-                    contrib = circuit_add_gate_alive(c, EVO_AND, i, no_higher[i]);
-                }
-                
-                if (result == -1) {
-                    result = contrib;
-                } else {
-                    result = circuit_add_gate_alive(c, EVO_OR, result, contrib);
-                }
-            }
-        }
-        
-        if (result == -1) {
-            result = circuit_add_gate_alive(c, EVO_XOR, 0, 0);  /* Constant 0 */
-        }
-        
-        c->output_map[index_bits - 1 - bit] = result;
-    }
+    free(higher_active);
 }
 
 /* ----- LEADING ZERO COUNT (CLZ) ----- */
@@ -7619,6 +7579,378 @@ bool detect_barrel_shift_sparse(TT **outputs, int n_in, int n_out) {
     return true;
 }
 
+
+
+
+
+
+
+
+
+
+
+/* ============================================================
+ * PROFESSIONAL 4-BIT ALU DETECTOR
+ * Matches Op(3) + A(4) + B(4) -> Res(4) + C(1) + Z(1) + N(1)
+ * ============================================================ */
+bool detect_prof_alu(TT **outputs, int n_in, int n_out) {
+    if (n_in != 11 || n_out != 7) return false;
+
+    for (int r = 0; r < 2048; r++) {
+        // Extract Op, A, B from the row index
+        int op = (r >> 8) & 0x7;
+        int a  = (r >> 4) & 0xF;
+        int b  = r & 0xF;
+
+        int res = 0, carry = 0;
+        switch(op) {
+            case 0: { int f = a + b; res = f & 0xF; carry = (f > 0xF); } break; // ADD
+            case 1: { int f = a - b; res = f & 0xF; carry = (a < b); } break;   // SUB
+            case 2: res = a & b; break;                                        // AND
+            case 3: res = a | b; break;                                        // OR
+            case 4: res = a ^ b; break;                                        // XOR
+            case 5: res = (~a) & 0xF; break;                                   // NOT
+            case 6: res = (a < b) ? 1 : 0; break;                              // SLT
+            case 7: { int f = a << 1; res = f & 0xF; carry = (f > 0xF); } break;// SLL
+        }
+
+        int zero = (res == 0) ? 1 : 0;
+        int neg  = (res >> 3) & 1;
+
+        // Verify all 7 outputs
+        for (int i = 0; i < 4; i++) {
+            if (tt_get_bit(outputs[3-i], r) != ((res >> i) & 1)) return false;
+        }
+        if (tt_get_bit(outputs[4], r) != carry) return false;
+        if (tt_get_bit(outputs[5], r) != zero)  return false;
+        if (tt_get_bit(outputs[6], r) != neg)   return false;
+    }
+    return true;
+}
+
+/* ============================================================
+ * PROFESSIONAL 4-BIT ALU BUILDER
+ * Constructs optimized gates for the 8-op ALU
+ * ============================================================ */
+/* ============================================================
+ * GENERALIZED PROFESSIONAL ALU DETECTOR
+ * Detects 3-bit Opcode + N-bit A + N-bit B
+ * Works for any N where total inputs = 3 + 2N
+ * ============================================================ */
+bool detect_prof_alu_gen(TT **outputs, int n_in, int n_out) {
+    if (n_in < 5 || (n_in - 3) % 2 != 0) return false;
+    int n = (n_in - 3) / 2;
+    if (n_out != n + 3) return false;
+
+    int total_rows = 1 << n_in;
+    int mask = (1 << n) - 1;
+    bool found_at_least_one = false;
+
+    for (int r = 0; r < total_rows; r++) {
+        // NEW: Check if this row was actually defined in the input string
+        int chunk = r / 64;
+        uint64_t bit_mask = 1ULL << (r % 64);
+        bool row_defined = false;
+        for(int o=0; o<n_out; o++) {
+            if (g_masks[o].chunks[chunk] & bit_mask) { row_defined = true; break; }
+        }
+        if (!row_defined) continue; // Skip undefined rows
+        
+        found_at_least_one = true;
+
+        // ... (Keep the same switch(op) logic here) ...
+        int op = (r >> (2 * n)) & 0x7;
+        int a  = (r >> n) & mask;
+        int b  = r & mask;
+        int res = 0, carry = 0;
+        switch(op) {
+            case 0: { int f = a + b; res = f & mask; carry = (f > mask); } break;
+            case 1: { int f = a - b; res = f & mask; carry = (a < b); } break;
+            case 2: res = a & b; break;
+            case 3: res = a | b; break;
+            case 4: res = a ^ b; break;
+            case 5: res = (~a) & mask; break;
+            case 6: res = (a < b) ? 1 : 0; break;
+            case 7: { int f = a << 1; res = f & mask; carry = (f > mask); } break;
+        }
+        int zero = (res == 0) ? 1 : 0;
+        int neg  = (res >> (n - 1)) & 1;
+
+        for (int bit = 0; bit < n; bit++)
+            if (tt_get_bit(outputs[n - 1 - bit], r) != ((res >> bit) & 1)) return false;
+        if (tt_get_bit(outputs[n], r) != carry) return false;
+        if (tt_get_bit(outputs[n + 1], r) != zero) return false;
+        if (tt_get_bit(outputs[n + 2], r) != neg) return false;
+    }
+    return found_at_least_one;
+}
+/* ============================================================
+ * GENERALIZED PROFESSIONAL ALU BUILDER
+ * Generates an N-bit ALU circuit structure
+ * ============================================================ */
+void build_prof_alu_gen(Circuit *c, int n) {
+    int op2 = 0, op1 = 1, op0 = 2; // Opcode pins
+    int zero_const = circuit_add_gate_alive(c, EVO_XOR, 0, 0);
+
+    // 1. Opcode Decoding (Selectors)
+    int n2 = circuit_add_gate_alive(c, EVO_NOT, op2, 0);
+    int n1 = circuit_add_gate_alive(c, EVO_NOT, op1, 0);
+    int n0 = circuit_add_gate_alive(c, EVO_NOT, op0, 0);
+    int m[8]; 
+    m[0] = circuit_add_gate_alive(c, EVO_AND, n2, circuit_add_gate_alive(c, EVO_AND, n1, n0));
+    m[1] = circuit_add_gate_alive(c, EVO_AND, n2, circuit_add_gate_alive(c, EVO_AND, n1, op0));
+    m[2] = circuit_add_gate_alive(c, EVO_AND, n2, circuit_add_gate_alive(c, EVO_AND, op1, n0));
+    m[3] = circuit_add_gate_alive(c, EVO_AND, n2, circuit_add_gate_alive(c, EVO_AND, op1, op0));
+    m[4] = circuit_add_gate_alive(c, EVO_AND, op2, circuit_add_gate_alive(c, EVO_AND, n1, n0));
+    m[5] = circuit_add_gate_alive(c, EVO_AND, op2, circuit_add_gate_alive(c, EVO_AND, n1, op0));
+    m[6] = circuit_add_gate_alive(c, EVO_AND, op2, circuit_add_gate_alive(c, EVO_AND, op1, n0));
+    m[7] = circuit_add_gate_alive(c, EVO_AND, op2, circuit_add_gate_alive(c, EVO_AND, op1, op0));
+
+    // 2. Math Unit (Adder/Subtractor)
+    int sub_sig = circuit_add_gate_alive(c, EVO_OR, m[1], m[6]);
+    int *sum = (int*)malloc(sizeof(int) * n);
+    int carry_wire = sub_sig;
+    int last_carry = 0;
+
+    for (int i = n - 1; i >= 0; i--) {
+        int a_wire = 3 + i;
+        int b_wire = 3 + n + i;
+        int b_val = circuit_add_gate_alive(c, EVO_XOR, b_wire, sub_sig);
+        
+        int axb = circuit_add_gate_alive(c, EVO_XOR, a_wire, b_val);
+        sum[i] = circuit_add_gate_alive(c, EVO_XOR, axb, carry_wire);
+        
+        int ab = circuit_add_gate_alive(c, EVO_AND, a_wire, b_val);
+        int axbc = circuit_add_gate_alive(c, EVO_AND, axb, carry_wire);
+        carry_wire = circuit_add_gate_alive(c, EVO_OR, ab, axbc);
+        if (i == 0) last_carry = carry_wire;
+    }
+
+    // 3. SLT (A < B is true if Subtraction has a borrow)
+    int borrow = circuit_add_gate_alive(c, EVO_NOT, last_carry, 0);
+
+    // 4. Per-bit Logic and MUXing
+    int *final_res = (int*)malloc(sizeof(int) * n);
+    for (int i = 0; i < n; i++) {
+        int a_w = 3 + i, b_w = 3 + n + i;
+        
+        int logic_and = circuit_add_gate_alive(c, EVO_AND, a_w, b_w);
+        int logic_or  = circuit_add_gate_alive(c, EVO_OR,  a_w, b_w);
+        int logic_xor = circuit_add_gate_alive(c, EVO_XOR, a_w, b_w);
+        int logic_not = circuit_add_gate_alive(c, EVO_NOT, a_w, 0);
+        int logic_sll = (i == n-1) ? zero_const : (3 + i + 1);
+
+        // Selection Tree
+        int t01 = circuit_add_gate_alive(c, EVO_AND, circuit_add_gate_alive(c, EVO_OR, m[0], m[1]), sum[i]);
+        int t2  = circuit_add_gate_alive(c, EVO_AND, m[2], logic_and);
+        int t3  = circuit_add_gate_alive(c, EVO_AND, m[3], logic_or);
+        int t4  = circuit_add_gate_alive(c, EVO_AND, m[4], logic_xor);
+        int t5  = circuit_add_gate_alive(c, EVO_AND, m[5], logic_not);
+        int t6  = circuit_add_gate_alive(c, EVO_AND, m[6], (i == n-1) ? borrow : zero_const);
+        int t7  = circuit_add_gate_alive(c, EVO_AND, m[7], logic_sll);
+
+        int o1 = circuit_add_gate_alive(c, EVO_OR, t01, t2);
+        int o2 = circuit_add_gate_alive(c, EVO_OR, t3, t4);
+        int o3 = circuit_add_gate_alive(c, EVO_OR, t5, t6);
+        int o4 = circuit_add_gate_alive(c, EVO_OR, o1, o2);
+        int o5 = circuit_add_gate_alive(c, EVO_OR, o3, t7);
+        final_res[i] = circuit_add_gate_alive(c, EVO_OR, o4, o5);
+        c->output_map[i] = final_res[i];
+    }
+
+    // 5. Flags
+    int c_add = circuit_add_gate_alive(c, EVO_AND, m[0], last_carry);
+    int c_sub = circuit_add_gate_alive(c, EVO_AND, m[1], borrow);
+    int c_sll = circuit_add_gate_alive(c, EVO_AND, m[7], 3); // A MSB
+    c->output_map[n] = circuit_add_gate_alive(c, EVO_OR, c_add, circuit_add_gate_alive(c, EVO_OR, c_sub, c_sll));
+
+    int z_tree = final_res[0];
+    for(int i=1; i<n; i++) z_tree = circuit_add_gate_alive(c, EVO_OR, z_tree, final_res[i]);
+    c->output_map[n+1] = circuit_add_gate_alive(c, EVO_NOT, z_tree, 0);
+    c->output_map[n+2] = final_res[0];
+
+    free(sum); free(final_res);
+}
+
+
+/* ============================================================
+ * GENERALIZED DECODER (N to 2^N)
+ * ============================================================ */
+bool detect_decoder_gen(TT **outputs, int n_in, int n_out) {
+    if (n_out != (1 << n_in)) return false;
+    for (int r = 0; r < (1 << n_in); r++) {
+        int addr = 0;
+        for (int i = 0; i < n_in; i++) addr = (addr << 1) | ((r >> (n_in - 1 - i)) & 1);
+        for (int out = 0; out < n_out; out++) {
+            if (tt_get_bit(outputs[out], r) != (out == addr)) return false;
+        }
+    }
+    return true;
+}
+
+void build_decoder_gen(Circuit *c, int n_in) {
+    int num_outputs = 1 << n_in;
+    int *not_in = (int*)malloc(sizeof(int) * n_in);
+    for (int i = 0; i < n_in; i++) not_in[i] = circuit_add_gate_alive(c, EVO_NOT, i, 0);
+    for (int i = 0; i < num_outputs; i++) {
+        int term = -1;
+        for (int bit = 0; bit < n_in; bit++) {
+            int wire = ((i >> (n_in - 1 - bit)) & 1) ? bit : not_in[bit];
+            if (term == -1) term = wire;
+            else term = circuit_add_gate_alive(c, EVO_AND, term, wire);
+        }
+        c->output_map[i] = term;
+    }
+    free(not_in);
+}
+
+/* ============================================================
+ * GENERALIZED ENCODER (2^N to N)
+ * ============================================================ */
+bool detect_encoder_gen(TT **outputs, int n_in, int n_out) {
+    if (n_in != (1 << n_out)) return false;
+    for (int i = 0; i < n_in; i++) {
+        int row = 1 << (n_in - 1 - i); // One-hot row
+        for (int bit = 0; bit < n_out; bit++) {
+            if (tt_get_bit(outputs[bit], row) != ((i >> (n_out - 1 - bit)) & 1)) return false;
+        }
+    }
+    return true;
+}
+
+void build_encoder_gen(Circuit *c, int n_in, int n_out) {
+    for (int bit = 0; bit < n_out; bit++) {
+        int term = -1;
+        for (int i = 0; i < n_in; i++) {
+            if ((i >> (n_out - 1 - bit)) & 1) {
+                if (term == -1) term = i;
+                else term = circuit_add_gate_alive(c, EVO_OR, term, i);
+            }
+        }
+        c->output_map[bit] = (term == -1) ? circuit_add_gate_alive(c, EVO_XOR, 0, 0) : term;
+    }
+}
+
+/* ============================================================
+ * GENERALIZED MUX (Data: 2^S, Select: S, Out: 1)
+ * ============================================================ */
+bool detect_mux_gen(TT **outputs, int n_in, int n_out) {
+    if (n_out != 1) return false;
+    int s = 0;
+    while (( (1 << s) + s ) < n_in) s++;
+    if (( (1 << s) + s ) != n_in) return false;
+    
+    int num_data = 1 << s;
+    for (int r = 0; r < (1 << n_in); r++) {
+        int data_bits = (r >> s);
+        int sel = r & ((1 << s) - 1);
+        int expected = (data_bits >> (num_data - 1 - sel)) & 1;
+        if (tt_get_bit(outputs[0], r) != expected) return false;
+    }
+    return true;
+}
+
+void build_mux_gen(Circuit *c, int n_in) {
+    int s = 0; while (( (1 << s) + s ) < n_in) s++;
+    int num_data = 1 << s;
+    int *data_wires = (int*)malloc(sizeof(int) * num_data);
+    for (int i = 0; i < num_data; i++) data_wires[i] = i;
+
+    for (int stage = 0; stage < s; stage++) {
+        int sel_wire = num_data + (s - 1 - stage);
+        int not_sel = circuit_add_gate_alive(c, EVO_NOT, sel_wire, 0);
+        int num_pairs = 1 << (s - 1 - stage);
+        for (int i = 0; i < num_pairs; i++) {
+            int d0 = data_wires[i*2 + 1]; // LSB-side
+            int d1 = data_wires[i*2];     // MSB-side
+            int t0 = circuit_add_gate_alive(c, EVO_AND, not_sel, d0);
+            int t1 = circuit_add_gate_alive(c, EVO_AND, sel_wire, d1);
+            data_wires[i] = circuit_add_gate_alive(c, EVO_OR, t0, t1);
+        }
+    }
+    c->output_map[0] = data_wires[0];
+    free(data_wires);
+}
+
+/* ============================================================
+ * GENERALIZED DEMUX (Data: 1, Select: S, Out: 2^S)
+ * ============================================================ */
+bool detect_demux_gen(TT **outputs, int n_in, int n_out) {
+    int s = 0; while ((1 << s) < n_out) s++;
+    if (n_in != 1 + s || (1 << s) != n_out) return false;
+    for (int r = 0; r < (1 << n_in); r++) {
+        int data = (r >> s) & 1;
+        int sel = r & ((1 << s) - 1);
+        for (int i = 0; i < n_out; i++) {
+            if (tt_get_bit(outputs[i], r) != (i == sel ? data : 0)) return false;
+        }
+    }
+    return true;
+}
+
+void build_demux_gen(Circuit *c, int n_in, int n_out) {
+    int s = n_in - 1;
+    int data_wire = 0;
+    int *not_sel = (int*)malloc(sizeof(int) * s);
+    for (int i = 0; i < s; i++) not_sel[i] = circuit_add_gate_alive(c, EVO_NOT, i + 1, 0);
+
+    for (int i = 0; i < n_out; i++) {
+        int term = data_wire;
+        for (int bit = 0; bit < s; bit++) {
+            int sel_bit = (i >> (s - 1 - bit)) & 1;
+            term = circuit_add_gate_alive(c, EVO_AND, term, sel_bit ? (bit + 1) : not_sel[bit]);
+        }
+        c->output_map[i] = term;
+    }
+    free(not_sel);
+}
+
+
+
+
+
+
+
+
+
+/* ============================================================
+ * BUS PASS-THROUGH (Buffer)
+ * Detects if the outputs are identical to the inputs.
+ * ============================================================ */
+bool detect_bus_pass(TT **outputs, int n_in, int n_out) {
+    if (n_in != n_out) return false;
+    int total_rows = 1 << n_in;
+    bool found_at_least_one = false;
+
+    for (int r = 0; r < total_rows; r++) {
+        // Sparse Check: Only verify rows defined in the input string
+        int chunk = r / 64;
+        uint64_t bit_mask = 1ULL << (r % 64);
+        bool row_defined = false;
+        for(int o=0; o<n_out; o++) {
+            if (g_masks[o].chunks[chunk] & bit_mask) { row_defined = true; break; }
+        }
+        if (!row_defined) continue;
+
+        found_at_least_one = true;
+        for (int i = 0; i < n_out; i++) {
+            // Check if Output[i] == Input[i]
+            int expected_bit = (r >> (n_in - 1 - i)) & 1;
+            if (tt_get_bit(outputs[i], r) != expected_bit) return false;
+        }
+    }
+    return found_at_least_one;
+}
+
+void build_bus_pass(Circuit *c, int n) {
+    // Zero-gate construction: just map output wires directly to input wires
+    for (int i = 0; i < n; i++) {
+        c->output_map[i] = i; 
+    }
+    printf("    Generated zero-gate Bus Pass-through (Buffer).\n");
+}
+
+
 /* ============================================================
  * UPDATED try_structural_synthesis WITH ALL NEW DETECTORS
  * ============================================================ */
@@ -7633,15 +7965,16 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     c->dead_count = 0;
     
     
-	
-  
-    /* === TIER -1: ALU (highest priority - very specific pattern) === */
-    if (detect_alu(outputs, num_inputs, num_outputs)) {
-        int n = (num_inputs - 2) / 2;
-        printf("[*] Detected %d-BIT ALU (ADD/SUB/AND/OR)!\n", n);
-        build_alu(c, n);
+	    
+    /* === TIER -1: GENERALIZED PROFESSIONAL ALU === */
+    if (detect_prof_alu_gen(outputs, num_inputs, num_outputs)) {
+        int n = (num_inputs - 3) / 2;
+        printf("[*] Detected %d-BIT PROFESSIONAL ALU (8 Ops + Flags)!\n", n);
+        build_prof_alu_gen(c, n);
         return true;
     }
+  
+	
     
     int k = detect_const_mult_any(outputs, num_inputs, num_outputs);
     if (k > 0) {
@@ -7693,7 +8026,6 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     
     /* === TIER 1: Complex Arithmetic === */
     
-    /* === TIER 2: Constant Multiplier (General) === */
 	if (detect_const_mult_general(outputs, num_inputs, num_outputs)) {
     	printf("[*] Detected CONSTANT MULTIPLIER (x%d)!\n", g_detected_mult_const);
     	build_const_mult_general(c);
@@ -7722,6 +8054,32 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     }
     
     /* === TIER 2: Two-Operand Arithmetic === */
+    
+        /* --- TIER 2: BUS LOGIC (MUX, DECODER, ENCODER) --- */
+    if (detect_decoder_gen(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected %d-to-%d DECODER!\n", num_inputs, num_outputs);
+        build_decoder_gen(c, num_inputs);
+        return true;
+    }
+
+    if (detect_encoder_gen(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected %d-to-%d ENCODER!\n", num_inputs, num_outputs);
+        build_encoder_gen(c, num_inputs, num_outputs);
+        return true;
+    }
+
+    if (detect_mux_gen(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected GENERALIZED MUX!\n");
+        build_mux_gen(c, num_inputs);
+        return true;
+    }
+
+    if (detect_demux_gen(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected %d-WAY DEMUX!\n", num_outputs);
+        build_demux_gen(c, num_inputs, num_outputs);
+        return true;
+    }
+    
     if (detect_adder(outputs, num_inputs, num_outputs)) {
         printf("[*] Detected ADDER!\n");
         build_ripple_carry_adder(c, num_inputs / 2);
@@ -7734,6 +8092,15 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     }
     
     /* === TIER 3: Single-Operand Arithmetic === */
+    
+        /* === TIER 3: SIGNAL PASSING === */
+    if (detect_bus_pass(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected BUS PASS-THROUGH (Buffer)!\n");
+        build_bus_pass(c, num_inputs);
+        return true;
+    }
+    
+    
     // Barrel Shifter Detection (Sparse check allows incomplete truth tables)
     int shift_bits = 0;
     while ((1 << shift_bits) < num_outputs) shift_bits++;
@@ -7891,7 +8258,7 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     }
     if (detect_priority_encoder(outputs, num_inputs, num_outputs)) {
         printf("[*] Detected PRIORITY ENCODER!\n");
-        build_priority_encoder(c, num_inputs);
+        build_priority_encoder_gen(c, num_inputs);
         return true;
     }
     if (detect_hamming_7_4_encode(outputs, num_inputs, num_outputs)) {
@@ -8003,9 +8370,12 @@ int main() {
 #endif
 
     // NOTE: Should be wrapped in strdup(); on literal unless a generator is with heap is used
-char *truth_table = strdup(
-    "00001:000 00101:001 01001:010 01101:011 10001:100 10101:101 11001:110 11101:111 "
-    "00010:000 01010:001 10010:010 11010:011 00011:000 01111:001 11011:010 00000:111");
+	char *truth_table = strdup(
+		"0000:1111110 0001:0110000 0010:1101101 0011:1111001 "
+        "0100:0110011 0101:1011011 0110:1011111 0111:1110000 "
+        "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
+        "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX"
+		);
     const char *allowed_gates = "ALL";
     
     
