@@ -2941,7 +2941,32 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
         return;
     }
 
-    int depths[MAX_EVOL_GATES];
+    /* FIX: Heap allocation to prevent stack overflow */
+    int alloc_size = (c->num_gates > 0) ? c->num_gates : 1;
+    
+    int *depths = (int*)calloc(alloc_size, sizeof(int));
+    float *gate_x = (float*)calloc(alloc_size, sizeof(float));
+    float *gate_y = (float*)calloc(alloc_size, sizeof(float));
+    int *gate_ids = (int*)malloc(sizeof(int) * alloc_size);
+    int *input_ids = (int*)malloc(sizeof(int) * num_inputs_param);
+    int *output_ids = (int*)malloc(sizeof(int) * num_outputs_param);
+    float *input_y = (float*)malloc(sizeof(float) * num_inputs_param);
+    float *output_y = (float*)malloc(sizeof(float) * num_outputs_param);
+    
+    if (!depths || !gate_x || !gate_y || !gate_ids || !input_ids || !output_ids || !input_y || !output_y) {
+        printf("Error: Memory allocation failed in render_dls2_json\n");
+        if (depths) free(depths);
+        if (gate_x) free(gate_x);
+        if (gate_y) free(gate_y);
+        if (gate_ids) free(gate_ids);
+        if (input_ids) free(input_ids);
+        if (output_ids) free(output_ids);
+        if (input_y) free(input_y);
+        if (output_y) free(output_y);
+        fclose(f);
+        return;
+    }
+
     calculate_gate_depths(c, depths);
     int max_depth = get_max_depth(depths, c->num_gates);
     if (c->num_gates == 0) max_depth = 0;
@@ -2949,15 +2974,10 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
     GridLayout grid;
     calculate_grid_layout(max_depth, &cfg, &grid);
 
-    int input_ids[MAX_INPUTS];
-    int output_ids[MAX_OUTPUTS];
-    int gate_ids[MAX_EVOL_GATES];
-
     for (int i = 0; i < num_inputs_param; i++)  input_ids[i]  = 1000 + i;
     for (int i = 0; i < num_outputs_param; i++) output_ids[i] = 2000 + i;
     for (int i = 0; i < c->num_gates; i++)      gate_ids[i]   = 3000 + i;
 
-    float input_y[MAX_INPUTS];
     float total_input_height = (num_inputs_param - 1) * cfg.input_v_spacing;
     float input_start_y = total_input_height / 2.0f;
 
@@ -2965,15 +2985,11 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
         input_y[i] = input_start_y - i * cfg.input_v_spacing;
     }
 
-    float gate_x[MAX_EVOL_GATES];
-    float gate_y[MAX_EVOL_GATES];
-
     position_gates_with_collision_avoidance(
         c, depths, max_depth, input_y,
         gate_x, gate_y, &grid, &cfg
     );
 
-    float output_y[MAX_OUTPUTS];
     float total_output_height = (num_outputs_param - 1) * cfg.output_v_spacing;
     float output_start_y = total_output_height / 2.0f;
 
@@ -3179,16 +3195,26 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
     fclose(f);
 
     printf("\n");
-    printf("╔═══════════════════════════════════════════════════╗\n");
-    printf("║       DLS2 GRID MANHATTAN ROUTING EXPORT          ║\n");
-    printf("╠═══════════════════════════════════════════════════╣\n");
-    printf("║  File: %-41s ║\n", filename);
-    printf("║  Chip Size: %.2f x %.2f                           ║\n", chip_width, chip_height);
-    printf("║  Gates: %-3d    Depths: %-3d    Wires: %-3d          ║\n",
+    printf("╔═══════════════════════════════════════════════════════════╗\n");
+    printf("║       DLS2 GRID MANHATTAN ROUTING EXPORT                  ║\n");
+    printf("╠═══════════════════════════════════════════════════════════╣\n");
+    printf("║  File: %-49s ║\n", filename);
+    printf("║  Chip Size: %.2f x %.2f                                   ║\n", chip_width, chip_height);
+    printf("║  Gates: %-3d    Depths: %-3d    Wires: %-3d                  ║\n",
            gate_output_idx, max_depth + 1, total_wires);
-    printf("╚═══════════════════════════════════════════════════╝\n");
+    printf("╚═══════════════════════════════════════════════════════════╝\n");
 
     update_project_description(g_chip_name);
+
+    /* Free heap allocations */
+    free(depths);
+    free(gate_x);
+    free(gate_y);
+    free(gate_ids);
+    free(input_ids);
+    free(output_ids);
+    free(input_y);
+    free(output_y);
 }
 
 /* ============================================================
