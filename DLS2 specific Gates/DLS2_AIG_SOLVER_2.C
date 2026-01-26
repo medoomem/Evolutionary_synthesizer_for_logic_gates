@@ -13,11 +13,11 @@
 
 /* Set to 1 to enable, 0 to disable */
 
-#define ENABLE_EVOLUTIONARY_REFINEMENT  1    /* Run CGP optimization after synthesis */
+#define ENABLE_EVOLUTIONARY_REFINEMENT  0    /* Run CGP optimization after synthesis */
 #define ENABLE_STRUCTURAL_DETECTION     1    /* Try pattern detection before AIG */
 #define ENABLE_TECHNOLOGY_MAPPING       1    /* Convert to allowed gate set */
 #define ENABLE_DLS2_EXPORT              1    /* Export JSON for Digital Logic Sim 2 */
-#define ENABLE_NETLIST_PRINT            0    /* Print circuit netlist to console */
+#define ENABLE_NETLIST_PRINT            1    /* Print circuit netlist to console */
 
 /* Evolution parameters (only used if ENABLE_EVOLUTIONARY_REFINEMENT = 1) */
 #define EVO_MAX_GENERATIONS         100000  /* Max generations before timeout */
