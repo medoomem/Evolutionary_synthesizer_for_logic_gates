@@ -13,7 +13,7 @@
 
 /* Set to 1 to enable, 0 to disable */
 
-#define ENABLE_EVOLUTIONARY_REFINEMENT  0    /* Run CGP optimization after synthesis */
+#define ENABLE_EVOLUTIONARY_REFINEMENT  1    /* Run CGP optimization after synthesis */
 #define ENABLE_STRUCTURAL_DETECTION     1    /* Try pattern detection before AIG */
 #define ENABLE_TECHNOLOGY_MAPPING       1    /* Convert to allowed gate set */
 #define ENABLE_DLS2_EXPORT              1    /* Export JSON for Digital Logic Sim 2 */
@@ -21,7 +21,7 @@
 
 /* Evolution parameters (only used if ENABLE_EVOLUTIONARY_REFINEMENT = 1) */
 #define EVO_MAX_GENERATIONS         100000  /* Max generations before timeout */
-#define EVO_TERMINATION_PLATEAU     10000  /* Stop if no improvement for this many gens */
+#define EVO_TERMINATION_PLATEAU     20000  /* Stop if no improvement for this many gens */
 #define EVO_KICK_THRESHOLD          200000   /* Generations before soft kick */
 #define EVO_PRINT_INTERVAL          500000   /* Progress print frequency */
 
@@ -5061,6 +5061,84 @@ void build_barrel_shift_left(Circuit *c, int data_bits, int shift_bits) {
 }
 
 
+
+
+
+
+
+
+/* 
+ * Optimized Barrel Shifter (Logarithmic MUX Tree)
+ * Handles variable left shift.
+ */
+void build_barrel_shifter_optimized(Circuit *c, int data_bits, int shift_bits) {
+    // Current state of wires for data bits [0..data_bits-1]
+    // Wire 0 is MSB (input 0), Wire data_bits-1 is LSB
+    int *current_wires = (int*)malloc(sizeof(int) * data_bits);
+    for(int i=0; i<data_bits; i++) current_wires[i] = i;
+
+    int zero_gate = -1;
+
+    // Iterate through shift control bits
+    // Shift inputs start after data inputs. 
+    // Usually shift_bits are LSB-ordered in control, but input[data_bits] is often MSB of shift.
+    // We'll assume input ordering: Data[0..N-1], Shift[N..N+S-1] where Shift[N] is MSB.
+    // Standard barrel shifters usually have Shift[0] as LSB.
+    
+    // Let's assume standard "Big Endian inputs": 
+    // Input 0 is Data MSB.
+    // Input data_bits is Shift MSB.
+    
+    int shift_input_base = data_bits;
+
+    for (int stage = 0; stage < shift_bits; stage++) {
+        // Stage 0 handles shift by 2^(shift_bits - 1 - 0) if MSB first
+        // Let's implement standard weighting:
+        // We'll map stage loop 's' to shift amount 2^s.
+        // We need to find which input wire corresponds to bit 2^s.
+        // If Shift is MSB-first, bit 2^0 (1) is at index (data_bits + shift_bits - 1).
+        
+        int shift_amt = 1 << stage;
+        int ctrl_wire = shift_input_base + (shift_bits - 1 - stage); // LSB of shift is last input
+        
+        int not_ctrl = circuit_add_gate_alive(c, EVO_NOT, ctrl_wire, 0);
+        int *next_wires = (int*)malloc(sizeof(int) * data_bits);
+
+        for (int i = 0; i < data_bits; i++) {
+            // Left Shift: Bit i moves to i - shift_amt (if i is index 0=MSB)
+            // Wait, standard array indexing: 0 is MSB.
+            // Value: 0010 (2). Shift 1 -> 0100 (4).
+            // Index 2 (1) moves to Index 1.
+            // So new_val[i] comes from old_val[i + shift_amt].
+            
+            int src_shifted_idx = i + shift_amt;
+            
+            int val_shifted;
+            if (src_shifted_idx >= data_bits) {
+                if (zero_gate == -1) zero_gate = circuit_add_gate_alive(c, EVO_XOR, 0, 0);
+                val_shifted = zero_gate; // Shift in zeros
+            } else {
+                val_shifted = current_wires[src_shifted_idx];
+            }
+            
+            int val_unshifted = current_wires[i];
+
+            // MUX: If ctrl, use shifted, else use unshifted
+            int t1 = circuit_add_gate_alive(c, EVO_AND, ctrl_wire, val_shifted);
+            int t2 = circuit_add_gate_alive(c, EVO_AND, not_ctrl, val_unshifted);
+            next_wires[i] = circuit_add_gate_alive(c, EVO_OR, t1, t2);
+        }
+        
+        free(current_wires);
+        current_wires = next_wires;
+    }
+
+    for(int i=0; i<data_bits; i++) c->output_map[i] = current_wires[i];
+    free(current_wires);
+}
+
+
+
 /* ============================================================
  * 7-SEGMENT DISPLAY DECODERS
  * ============================================================ */
@@ -5133,62 +5211,64 @@ bool detect_bcd_to_7seg(TT **outputs, int n_in, int n_out) {
     return true; // Rows 10-15 are treated as Don't Cares
 }
 
-/* ----- BCD TO 7-SEGMENT BUILDER (Optimized) ----- */
+/* 
+ * Optimized BCD to 7-Segment Decoder 
+ * Uses shared boolean logic terms derived from K-Maps
+ */
 void build_bcd_to_7seg(Circuit *c) {
-    int A = 0, B = 1, C = 2, D = 3;
+    // Inputs: A(MSB), B, C, D(LSB)
+    // Assumes input 0 is A, input 3 is D based on standard ordering
+    int A = 0, B = 1, C = 2, D = 3; 
 
-    // 1. Primary Inversions
+    // 1. Inverters
     int nB = circuit_add_gate_alive(c, EVO_NOT, B, 0);
     int nC = circuit_add_gate_alive(c, EVO_NOT, C, 0);
     int nD = circuit_add_gate_alive(c, EVO_NOT, D, 0);
 
-    // 2. Shared Logic Core (The "Logic Engine")
-    // These terms are carefully chosen because they appear in multiple segments
-    int B_xor_C   = circuit_add_gate_alive(c, EVO_XOR, B, C);
-    int B_xnor_D  = circuit_add_gate_alive(c, EVO_XNOR, B, D);
-    int C_xnor_D  = circuit_add_gate_alive(c, EVO_XNOR, C, D);
-    
+    // 2. Shared Terms (The Logic Core)
+    int C_and_nD = circuit_add_gate_alive(c, EVO_AND, C, nD);
     int nB_and_nD = circuit_add_gate_alive(c, EVO_AND, nB, nD);
-    int C_and_nD  = circuit_add_gate_alive(c, EVO_AND, C, nD);
-    int nB_and_C  = circuit_add_gate_alive(c, EVO_AND, nB, C);
+    int B_xor_C = circuit_add_gate_alive(c, EVO_XOR, B, C);
+    int B_xnor_D = circuit_add_gate_alive(c, EVO_XNOR, B, D);
+    int C_xnor_D = circuit_add_gate_alive(c, EVO_XNOR, C, D);
     
-    // This specific term is shared between segments d and f
-    int B_and_nC  = circuit_add_gate_alive(c, EVO_AND, B, nC);
-    int BnC_and_D = circuit_add_gate_alive(c, EVO_AND, B_and_nC, D);
+    // 3. Segment Generation
+    // Seg A: A + C + (B XNOR D)
+    int a_term = circuit_add_gate_alive(c, EVO_OR, A, C);
+    c->output_map[0] = circuit_add_gate_alive(c, EVO_OR, a_term, B_xnor_D);
 
-    // 3. Segment Assembly (Factored to reuse previous OR gates)
-    
-    // Segment e (Built first because it's a sub-component of d)
-    int seg_e = circuit_add_gate_alive(c, EVO_OR, nB_and_nD, C_and_nD);
-    c->output_map[4] = seg_e;
-
-    // Segment g (Factored to be reused in segment a)
-    int g_partial = circuit_add_gate_alive(c, EVO_OR, A, B_xor_C);
-    int seg_g     = circuit_add_gate_alive(c, EVO_OR, g_partial, C_and_nD);
-    c->output_map[6] = seg_g;
-
-    // Segment a (Reuses A | C and B_xnor_D)
-    int a_partial = circuit_add_gate_alive(c, EVO_OR, A, C);
-    c->output_map[0] = circuit_add_gate_alive(c, EVO_OR, a_partial, B_xnor_D);
-
-    // Segment b (Very simple)
+    // Seg B: nB + (C XNOR D)
     c->output_map[1] = circuit_add_gate_alive(c, EVO_OR, nB, C_xnor_D);
 
-    // Segment c (Reuses B | nC)
-    int c_partial = circuit_add_gate_alive(c, EVO_OR, B, nC);
-    c->output_map[2] = circuit_add_gate_alive(c, EVO_OR, c_partial, D);
+    // Seg C: B + nC + D
+    int c_term = circuit_add_gate_alive(c, EVO_OR, B, nC);
+    c->output_map[2] = circuit_add_gate_alive(c, EVO_OR, c_term, D);
 
-    // Segment d (Highly factored: uses seg_e and nB_and_C)
-    int d_partial = circuit_add_gate_alive(c, EVO_OR, A, nB_and_C);
-    int d_mid     = circuit_add_gate_alive(c, EVO_OR, d_partial, seg_e);
-    c->output_map[3] = circuit_add_gate_alive(c, EVO_OR, d_mid, BnC_and_D);
+    // Seg D: A + (nB & nD) + (C & nD) + (B & nC & D) + (nB & C)
+    // Simplified: A + (C&nD) + (nB&C) + (B&nC&D) + (nB&nD)
+    int nB_and_C = circuit_add_gate_alive(c, EVO_AND, nB, C);
+    int B_and_nC = circuit_add_gate_alive(c, EVO_AND, B, nC);
+    int B_nC_D = circuit_add_gate_alive(c, EVO_AND, B_and_nC, D);
+    
+    int d_t1 = circuit_add_gate_alive(c, EVO_OR, A, C_and_nD);
+    int d_t2 = circuit_add_gate_alive(c, EVO_OR, nB_and_C, nB_and_nD);
+    int d_t3 = circuit_add_gate_alive(c, EVO_OR, d_t1, d_t2);
+    c->output_map[3] = circuit_add_gate_alive(c, EVO_OR, d_t3, B_nC_D);
 
-    // Segment f (Reuses BnC_and_D)
-    int f_nCnD    = circuit_add_gate_alive(c, EVO_AND, nC, nD);
-    int f_BnD     = circuit_add_gate_alive(c, EVO_AND, B, nD);
-    int f_top     = circuit_add_gate_alive(c, EVO_OR, A, f_nCnD);
-    int f_bot     = circuit_add_gate_alive(c, EVO_OR, f_BnD, BnC_and_D);
-    c->output_map[5] = circuit_add_gate_alive(c, EVO_OR, f_top, f_bot);
+    // Seg E: (nB & nD) + (C & nD)
+    c->output_map[4] = circuit_add_gate_alive(c, EVO_OR, nB_and_nD, C_and_nD);
+
+    // Seg F: A + (nC & nD) + (B & nC) + (B & nD)
+    int nC_and_nD = circuit_add_gate_alive(c, EVO_AND, nC, nD);
+    int B_and_nD = circuit_add_gate_alive(c, EVO_AND, B, nD);
+    
+    int f_t1 = circuit_add_gate_alive(c, EVO_OR, A, nC_and_nD);
+    int f_t2 = circuit_add_gate_alive(c, EVO_OR, B_and_nC, B_and_nD);
+    c->output_map[5] = circuit_add_gate_alive(c, EVO_OR, f_t1, f_t2);
+
+    // Seg G: A + (B XOR C) + (C & nD)
+    int g_t1 = circuit_add_gate_alive(c, EVO_OR, A, B_xor_C);
+    c->output_map[6] = circuit_add_gate_alive(c, EVO_OR, g_t1, C_and_nD);
 }
 
 /* ----- HEXADECIMAL TO 7-SEGMENT (0-F, all 16 values) ----- */
@@ -6359,6 +6439,52 @@ bool tt_are_complements(TT *a, TT *b) {
 
 
 
+/* 
+ * Shared-Subfunction Recursive Solver 
+ * Reuses wires for identical truth table branches across different outputs.
+ */
+int build_recursive_strashed(Circuit *c, TT *t, int depth, int *perm) {
+    int val;
+    if (tt_is_const(t, &val)) {
+        if (val == 0) return circuit_add_gate_alive(c, EVO_XOR, 0, 0); 
+        else { int z = circuit_add_gate_alive(c, EVO_XOR, 0, 0); return circuit_add_gate_alive(c, EVO_NOT, z, 0); }
+    }
+
+    // Look up this specific Truth Table in the global memo
+    int cached = circ_memo_lookup(c, t);
+    if (cached != -1) return cached;
+
+    TT *low, *high;
+    tt_split_half(t, &low, &high);
+    int sel = perm[depth]; 
+    int res = -1;
+
+    if (tt_equals(low, high)) {
+        res = build_recursive_strashed(c, low, depth + 1, perm);
+    } else if (tt_are_complements(low, high)) {
+        res = circuit_add_gate_alive(c, EVO_XOR, sel, build_recursive_strashed(c, low, depth + 1, perm));
+    } else if (tt_is_all_zeros(low)) {
+        res = circuit_add_gate_alive(c, EVO_AND, sel, build_recursive_strashed(c, high, depth + 1, perm));
+    } else if (tt_is_all_zeros(high)) {
+        int not_sel = circuit_add_gate_alive(c, EVO_NOT, sel, 0);
+        res = circuit_add_gate_alive(c, EVO_AND, not_sel, build_recursive_strashed(c, low, depth + 1, perm));
+    } else {
+        // Standard MUX with shared child wires
+        int w0 = build_recursive_strashed(c, low, depth + 1, perm);
+        int w1 = build_recursive_strashed(c, high, depth + 1, perm);
+        int not_sel = circuit_add_gate_alive(c, EVO_NOT, sel, 0);
+        int t0 = circuit_add_gate_alive(c, EVO_AND, not_sel, w0);
+        int t1 = circuit_add_gate_alive(c, EVO_AND, sel, w1);
+        res = circuit_add_gate_alive(c, EVO_OR, t0, t1);
+    }
+
+    free_tt(low); free_tt(high);
+    circ_memo_insert(t, res); // Store this wire for any future matching TT
+    return res;
+}
+
+
+
 /* Added 'int *perm' parameter to map depth back to physical wire ID */
 int build_recursive_msb(Circuit *c, TT *t, int depth, int *perm) {
     /* 1. Base Case: Constant */
@@ -6912,11 +7038,593 @@ void build_binary_to_bcd(Circuit *c, int n_bits) {
     free(reg_wires);
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+/* ============================================================
+ * CONSTANT MULTIPLIER DETECTOR (x5)
+ * ============================================================ */
+
+bool detect_const_mult_k5(TT **outputs, int n_in, int n_out) {
+    /* Check if Output = Input * 5 */
+    /* Input wire 0 is LSB, Output[0] is MSB */
+    
+    /* Verify expected output width for x5 */
+    int max_val = (1 << n_in) - 1;
+    int max_out = max_val * 5;
+    int expected_bits = 0;
+    int temp = max_out;
+    while (temp > 0) {
+        expected_bits++;
+        temp >>= 1;
+    }
+    if (max_out == 0) expected_bits = 1;
+    
+    if (n_out != expected_bits) return false;
+    
+    int total_rows = 1 << n_in;
+    
+    for (int row = 0; row < total_rows; row++) {
+        /* Calculate Input Value - input 0 is LSB */
+        /* Input i is at bit position (n_in - 1 - i) in row */
+        int val = 0;
+        for (int i = 0; i < n_in; i++) {
+            int input_bit = (row >> (n_in - 1 - i)) & 1;
+            val |= (input_bit << i);  /* Place in correct position */
+        }
+        
+        /* Calculate Expected Output (val * 5) */
+        int expected = val * 5;
+        
+        /* Verify bits - output[0] is MSB, output[n_out-1] is LSB */
+        for (int bit = 0; bit < n_out; bit++) {
+            int output_idx = n_out - 1 - bit;  /* bit 0 -> last output */
+            int expected_bit = (expected >> bit) & 1;
+            if (tt_get_bit(outputs[output_idx], row) != expected_bit)
+                return false;
+        }
+    }
+    return true;
+}
+
+/* ============================================================
+ * GENERALIZED CONSTANT MULTIPLIER BUILDER (x5)
+ * ============================================================ */
+
+void build_const_mult_k5(Circuit *c) {
+    /* 
+     * Multiply n-bit input by 5 using: x * 5 = x + (x << 2)
+     * 
+     * Input layout: input 0 = LSB, input n-1 = MSB
+     * Output layout: output_map[0] = MSB, output_map[n_out-1] = LSB
+     *
+     * Bit alignment for addition:
+     *   Position:  n+2  n+1   n   n-1  ...   3    2    1    0
+     *   x:          0    0    0  x[n-1]     x[3] x[2] x[1] x[0]
+     *   x<<2:     x[n-1] ... x[3] x[2] x[1] x[0]  0    0    0
+     */
+    
+    int n = c->num_inputs;
+    int n_out = c->num_outputs;
+    
+    /* Arrays to track sum and carry wires at each bit position */
+    int *result = (int*)malloc(sizeof(int) * n_out);
+    if (!result) return;
+    
+    int carry = -1;  /* -1 represents constant 0 (no wire needed yet) */
+    
+    for (int bit = 0; bit < n_out; bit++) {
+        /* Determine inputs at this bit position */
+        /* From x: bits 0 to n-1 */
+        /* From x<<2: bits 2 to n+1 (x[0] at position 2, x[n-1] at position n+1) */
+        
+        int a = (bit < n) ? bit : -1;                          /* From x */
+        int b = (bit >= 2 && bit < n + 2) ? (bit - 2) : -1;   /* From x<<2 */
+        
+        int sum_wire;
+        int new_carry = -1;
+        
+        if (a < 0 && b < 0) {
+            /* Both inputs are 0, only carry contributes */
+            sum_wire = carry;
+            new_carry = -1;
+        }
+        else if (a < 0) {
+            /* Only b contributes (a is 0) */
+            if (carry < 0) {
+                sum_wire = b;
+                new_carry = -1;
+            } else {
+                /* Half adder: b + carry */
+                sum_wire = circuit_add_gate_alive(c, EVO_XOR, b, carry);
+                new_carry = circuit_add_gate_alive(c, EVO_AND, b, carry);
+            }
+        }
+        else if (b < 0) {
+            /* Only a contributes (b is 0) */
+            if (carry < 0) {
+                sum_wire = a;
+                new_carry = -1;
+            } else {
+                /* Half adder: a + carry */
+                sum_wire = circuit_add_gate_alive(c, EVO_XOR, a, carry);
+                new_carry = circuit_add_gate_alive(c, EVO_AND, a, carry);
+            }
+        }
+        else {
+            /* Both a and b contribute */
+            if (carry < 0) {
+                /* Half adder: a + b */
+                sum_wire = circuit_add_gate_alive(c, EVO_XOR, a, b);
+                new_carry = circuit_add_gate_alive(c, EVO_AND, a, b);
+            } else {
+                /* Full adder: a + b + carry */
+                int xor_ab = circuit_add_gate_alive(c, EVO_XOR, a, b);
+                sum_wire = circuit_add_gate_alive(c, EVO_XOR, xor_ab, carry);
+                int and_ab = circuit_add_gate_alive(c, EVO_AND, a, b);
+                int and_xor_c = circuit_add_gate_alive(c, EVO_AND, xor_ab, carry);
+                new_carry = circuit_add_gate_alive(c, EVO_OR, and_ab, and_xor_c);
+            }
+        }
+        
+        result[bit] = sum_wire;
+        carry = new_carry;
+    }
+    
+    /* Map results to outputs (output[0] = MSB, output[n_out-1] = LSB) */
+    for (int bit = 0; bit < n_out; bit++) {
+        int output_idx = n_out - 1 - bit;
+        
+        if (result[bit] < 0) {
+            /* Need constant 0: XOR any input with itself */
+            int zero = circuit_add_gate_alive(c, EVO_XOR, 0, 0);
+            c->output_map[output_idx] = zero;
+        } else {
+            c->output_map[output_idx] = result[bit];
+        }
+    }
+    
+    free(result);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* ============================================================
+ * GENERAL CONSTANT MULTIPLIER DETECTOR
+ * Returns the constant k if output = input * k, or 0 if not detected
+ * ============================================================ */
+
+int detect_const_mult(TT **outputs, int n_in, int n_out) {
+    /* Returns the multiplier constant k, or 0 if not a constant multiplier */
+    
+    int total_rows = 1 << n_in;
+    
+    /* Find the row where input value equals 1 */
+    int row_for_1 = 0;
+    for (int row = 0; row < total_rows; row++) {
+        int val = 0;
+        for (int i = 0; i < n_in; i++) {
+            int input_bit = (row >> (n_in - 1 - i)) & 1;
+            val |= (input_bit << i);
+        }
+        if (val == 1) {
+            row_for_1 = row;
+            break;
+        }
+    }
+    
+    /* Read output for input=1 to get candidate constant k */
+    int candidate_k = 0;
+    for (int bit = 0; bit < n_out; bit++) {
+        int output_idx = n_out - 1 - bit;
+        int output_bit = tt_get_bit(outputs[output_idx], row_for_1);
+        candidate_k |= (output_bit << bit);
+    }
+    
+    /* Reject trivial cases: k=0 (always zero) or k=1 (identity) */
+    if (candidate_k <= 1) return 0;
+    
+    /* Verify output width is correct for this constant */
+    int max_input = (1 << n_in) - 1;
+    int max_output = max_input * candidate_k;
+    int expected_bits = 0;
+    int temp = max_output;
+    while (temp > 0) {
+        expected_bits++;
+        temp >>= 1;
+    }
+    if (expected_bits == 0) expected_bits = 1;
+    
+    if (n_out != expected_bits) return 0;
+    
+    /* Verify multiplication holds for ALL input combinations */
+    for (int row = 0; row < total_rows; row++) {
+        /* Calculate input value (input 0 is LSB) */
+        int val = 0;
+        for (int i = 0; i < n_in; i++) {
+            int input_bit = (row >> (n_in - 1 - i)) & 1;
+            val |= (input_bit << i);
+        }
+        
+        int expected = val * candidate_k;
+        
+        /* Verify each output bit */
+        for (int bit = 0; bit < n_out; bit++) {
+            int output_idx = n_out - 1 - bit;
+            int expected_bit = (expected >> bit) & 1;
+            if (tt_get_bit(outputs[output_idx], row) != expected_bit)
+                return 0;
+        }
+    }
+    
+    return candidate_k;
+}
+
+/* Boolean wrapper for use in detection chain */
+static int g_detected_mult_const = 0;
+
+bool detect_const_mult_general(TT **outputs, int n_in, int n_out) {
+    g_detected_mult_const = detect_const_mult(outputs, n_in, n_out);
+    return (g_detected_mult_const >= 2);
+}
+
+/* ============================================================
+ * GENERAL CONSTANT MULTIPLIER BUILDER
+ * Uses shift-and-add decomposition: x * k = sum of (x << i) for set bits in k
+ * ============================================================ */
+
+void build_const_mult(Circuit *c, int k) {
+    int n = c->num_inputs;
+    int n_out = c->num_outputs;
+    
+    /* Decompose k into powers of 2 (find positions of set bits) */
+    int shifts[32];
+    int num_shifts = 0;
+    int temp_k = k;
+    for (int i = 0; temp_k > 0; i++) {
+        if (temp_k & 1) {
+            shifts[num_shifts++] = i;
+        }
+        temp_k >>= 1;
+    }
+    
+    /* Special case: k is a power of 2 (just wire shifting, no gates needed) */
+    if (num_shifts == 1) {
+        int shift = shifts[0];
+        for (int bit = 0; bit < n_out; bit++) {
+            int output_idx = n_out - 1 - bit;
+            int src_bit = bit - shift;
+            
+            if (src_bit >= 0 && src_bit < n) {
+                /* Direct wire from shifted input */
+                c->output_map[output_idx] = src_bit;
+            } else {
+                /* Constant 0 */
+                int zero = circuit_add_gate_alive(c, EVO_XOR, 0, 0);
+                c->output_map[output_idx] = zero;
+            }
+        }
+        return;
+    }
+    
+    /* General case: add multiple shifted versions using adder chain */
+    
+    /* Accumulator holds current partial sum wires (-1 = constant 0) */
+    int *accum = (int*)malloc(sizeof(int) * n_out);
+    if (!accum) return;
+    
+    /* Initialize accumulator with first shifted input (x << shifts[0]) */
+    for (int bit = 0; bit < n_out; bit++) {
+        int src_bit = bit - shifts[0];
+        if (src_bit >= 0 && src_bit < n) {
+            accum[bit] = src_bit;  /* Wire directly to input */
+        } else {
+            accum[bit] = -1;  /* Constant 0 */
+        }
+    }
+    
+    /* Add each remaining shifted input to the accumulator */
+    for (int s = 1; s < num_shifts; s++) {
+        int shift = shifts[s];
+        int *new_accum = (int*)malloc(sizeof(int) * n_out);
+        if (!new_accum) { free(accum); return; }
+        
+        int carry = -1;  /* -1 represents constant 0 */
+        
+        for (int bit = 0; bit < n_out; bit++) {
+            int a = accum[bit];  /* From current accumulator */
+            int src_bit = bit - shift;
+            int b = (src_bit >= 0 && src_bit < n) ? src_bit : -1;  /* From shifted input */
+            
+            int sum_wire = -1;
+            int new_carry = -1;
+            
+            if (a < 0 && b < 0) {
+                /* 0 + 0 + carry */
+                sum_wire = carry;
+                new_carry = -1;
+            }
+            else if (a < 0) {
+                /* 0 + b + carry */
+                if (carry < 0) {
+                    sum_wire = b;
+                    new_carry = -1;
+                } else {
+                    sum_wire = circuit_add_gate_alive(c, EVO_XOR, b, carry);
+                    new_carry = circuit_add_gate_alive(c, EVO_AND, b, carry);
+                }
+            }
+            else if (b < 0) {
+                /* a + 0 + carry */
+                if (carry < 0) {
+                    sum_wire = a;
+                    new_carry = -1;
+                } else {
+                    sum_wire = circuit_add_gate_alive(c, EVO_XOR, a, carry);
+                    new_carry = circuit_add_gate_alive(c, EVO_AND, a, carry);
+                }
+            }
+            else {
+                /* a + b + carry (full addition) */
+                if (carry < 0) {
+                    /* Half adder */
+                    sum_wire = circuit_add_gate_alive(c, EVO_XOR, a, b);
+                    new_carry = circuit_add_gate_alive(c, EVO_AND, a, b);
+                } else {
+                    /* Full adder */
+                    int xor_ab = circuit_add_gate_alive(c, EVO_XOR, a, b);
+                    sum_wire = circuit_add_gate_alive(c, EVO_XOR, xor_ab, carry);
+                    int and_ab = circuit_add_gate_alive(c, EVO_AND, a, b);
+                    int and_xor_c = circuit_add_gate_alive(c, EVO_AND, xor_ab, carry);
+                    new_carry = circuit_add_gate_alive(c, EVO_OR, and_ab, and_xor_c);
+                }
+            }
+            
+            new_accum[bit] = sum_wire;
+            carry = new_carry;
+        }
+        
+        free(accum);
+        accum = new_accum;
+    }
+    
+    /* Map final accumulator to outputs (output[0] = MSB) */
+    for (int bit = 0; bit < n_out; bit++) {
+        int output_idx = n_out - 1 - bit;
+        
+        if (accum[bit] < 0) {
+            /* Create constant 0 */
+            int zero = circuit_add_gate_alive(c, EVO_XOR, 0, 0);
+            c->output_map[output_idx] = zero;
+        } else {
+            c->output_map[output_idx] = accum[bit];
+        }
+    }
+    
+    free(accum);
+}
+
+/* Wrapper that uses the detected constant */
+void build_const_mult_general(Circuit *c) {
+    build_const_mult(c, g_detected_mult_const);
+}
+
+
+/* ============================================================
+ * ADVANCED DETECTORS
+ * ============================================================ */
+
+/* Detects if Output = Input * K (for any integer K > 1) */
+int detect_const_mult_any(TT **outputs, int n_in, int n_out) {
+    int total_rows = 1 << n_in;
+    
+    /* 1. Derive candidate K from input=1 */
+    int row_for_1 = 0;
+    for (int i = 0; i < n_in; i++) {
+        // Construct the row index where input represents integer '1'
+        // Assuming MSB at input index 0, LSB at input index n_in-1
+        // If input 0 is LSB in your specific TT format, swap this loop.
+        // Based on previous logs, input 0 is usually MSB in row construction.
+        // Let's iterate rows to find value 1 explicitly to be safe.
+    }
+    
+    int row_idx_1 = -1;
+    for(int r=0; r<total_rows; r++) {
+        int val = 0;
+        for(int i=0; i<n_in; i++) val = (val << 1) | ((r >> (n_in - 1 - i)) & 1);
+        if(val == 1) { row_idx_1 = r; break; }
+    }
+    if (row_idx_1 == -1) return 0;
+
+    uint64_t k = 0;
+    for (int bit = 0; bit < n_out; bit++) {
+        // Output 0 is MSB
+        if (tt_get_bit(outputs[n_out - 1 - bit], row_idx_1)) 
+            k |= (1ULL << bit);
+    }
+    
+    if (k <= 1) return 0; // Trivial
+
+    /* 2. Verify K for ALL rows */
+    for (int r = 0; r < total_rows; r++) {
+        int val = 0;
+        for(int i=0; i<n_in; i++) val = (val << 1) | ((r >> (n_in - 1 - i)) & 1);
+        
+        uint64_t expected = (uint64_t)val * k;
+        
+        for (int bit = 0; bit < n_out; bit++) {
+            int out_idx = n_out - 1 - bit;
+            int actual_bit = tt_get_bit(outputs[out_idx], r);
+            int expected_bit = (expected >> bit) & 1;
+            if (actual_bit != expected_bit) return 0;
+        }
+    }
+    return (int)k;
+}
+
+/* Detects integer division A / B */
+bool detect_integer_division(TT **outputs, int n_in, int n_out) {
+    if (n_in < 3) return false;
+    // Heuristic: Split inputs roughly in half for Dividend/Divisor
+    int width_b = n_in / 2; 
+    int width_a = n_in - width_b;
+    
+    int total_rows = 1 << n_in;
+    bool match = true;
+
+    for (int r = 0; r < total_rows; r++) {
+        int a = (r >> width_b); // Upper bits
+        int b = r & ((1 << width_b) - 1); // Lower bits
+        
+        // Handle divide by zero: usually outputs all 1s or all 0s in logic libs
+        // We check against the table's specific behavior for 0
+        int expected;
+        if (b == 0) {
+            // Read what the table actually does for B=0
+            int actual_val = 0;
+            for (int bit = 0; bit < n_out; bit++) {
+                if (tt_get_bit(outputs[n_out - 1 - bit], r)) actual_val |= (1 << bit);
+            }
+            expected = actual_val; // Accept whatever the table defines as /0 behavior
+        } else {
+            expected = a / b;
+        }
+
+        for (int bit = 0; bit < n_out; bit++) {
+            int out_idx = n_out - 1 - bit;
+            int actual_bit = tt_get_bit(outputs[out_idx], r);
+            int exp_bit = (expected >> bit) & 1;
+            if (actual_bit != exp_bit) {
+                match = false; 
+                break;
+            }
+        }
+        if (!match) break;
+    }
+    return match;
+}
+
+
+
+
+
+
+
+
+
+/* 
+ * Sparsity-Aware Constant Multiplier 
+ * Skips redundant gates for bits that are zero.
+ */
+void build_const_multiplier_gen(Circuit *c, int k) {
+    int n_in = c->num_inputs;
+    int n_out = c->num_outputs;
+    int *accum = (int*)malloc(sizeof(int) * n_out);
+    for(int i=0; i<n_out; i++) accum[i] = -1;
+
+    bool is_first_term = true;
+    int zero_wire = -1;
+
+    for (int shift = 0; shift < 16; shift++) {
+        if (!((k >> shift) & 1)) continue;
+
+        if (is_first_term) {
+            for (int i = 0; i < n_in; i++) {
+                if (i + shift < n_out) accum[i + shift] = n_in - 1 - i;
+            }
+            is_first_term = false;
+        } else {
+            int carry = -1;
+            for (int bit = 0; bit < n_out; bit++) {
+                int a = accum[bit];
+                int b = (bit >= shift && (bit - shift) < n_in) ? (n_in - 1 - (bit - shift)) : -1;
+
+                int sum = -1, next_c = -1;
+                // Optimized logic: Skip gates if inputs are -1 (logical 0)
+                if (a == -1 && b == -1) { sum = carry; next_c = -1; }
+                else if (a == -1) { 
+                    if (carry == -1) sum = b; 
+                    else { sum = circuit_add_gate_alive(c, EVO_XOR, b, carry); next_c = circuit_add_gate_alive(c, EVO_AND, b, carry); }
+                } else if (b == -1) {
+                    if (carry == -1) sum = a;
+                    else { sum = circuit_add_gate_alive(c, EVO_XOR, a, carry); next_c = circuit_add_gate_alive(c, EVO_AND, a, carry); }
+                } else {
+                    if (carry == -1) { sum = circuit_add_gate_alive(c, EVO_XOR, a, b); next_c = circuit_add_gate_alive(c, EVO_AND, a, b); }
+                    else {
+                        int axb = circuit_add_gate_alive(c, EVO_XOR, a, b);
+                        sum = circuit_add_gate_alive(c, EVO_XOR, axb, carry);
+                        int ab = circuit_add_gate_alive(c, EVO_AND, a, b);
+                        int axbc = circuit_add_gate_alive(c, EVO_AND, axb, carry);
+                        next_c = circuit_add_gate_alive(c, EVO_OR, ab, axbc);
+                    }
+                }
+                accum[bit] = sum;
+                carry = next_c;
+            }
+        }
+    }
+    for (int i = 0; i < n_out; i++) {
+        int w = accum[n_out - 1 - i];
+        if (w == -1) { if(zero_wire == -1) zero_wire = circuit_add_gate_alive(c, EVO_XOR, 0, 0); c->output_map[i] = zero_wire; }
+        else c->output_map[i] = w;
+    }
+    free(accum);
+}
+
+
+
+/* 
+ * Sparse-Table Barrel Shifter Detector 
+ * Only checks the provided table entries instead of demanding all 2^N.
+ */
+bool detect_barrel_shift_sparse(TT **outputs, int n_in, int n_out) {
+    int s_bits = 0;
+    while ((1 << s_bits) < n_out) s_bits++;
+    if (n_in != n_out + s_bits) return false;
+
+    // Check every defined row in the truth table
+    for (int r = 0; r < (1 << n_in); r++) {
+        // Skip if this row is not defined in any output (all masks 0)
+        bool defined = false;
+        for(int o=0; o<n_out; o++) if((g_masks[o].chunks[r/64] >> (r%64)) & 1) { defined = true; break; }
+        if(!defined) continue;
+
+        int data = (r >> s_bits);
+        int shift = r & ((1 << s_bits) - 1);
+        int expected = (data << shift) & ((1 << n_out) - 1);
+
+        for (int bit = 0; bit < n_out; bit++) {
+            if (tt_get_bit(outputs[n_out - 1 - bit], r) != ((expected >> bit) & 1)) return false;
+        }
+    }
+    return true;
+}
+
 /* ============================================================
  * UPDATED try_structural_synthesis WITH ALL NEW DETECTORS
  * ============================================================ */
 
 bool try_structural_synthesis(TT **outputs, Circuit *c) {
+    // 1. Initialize Circuit
     c->num_inputs = num_inputs;
     c->num_outputs = num_outputs;
     c->num_gates = 0;
@@ -6925,7 +7633,7 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     c->dead_count = 0;
     
     
-
+	
   
     /* === TIER -1: ALU (highest priority - very specific pattern) === */
     if (detect_alu(outputs, num_inputs, num_outputs)) {
@@ -6935,6 +7643,12 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
         return true;
     }
     
+    int k = detect_const_mult_any(outputs, num_inputs, num_outputs);
+    if (k > 0) {
+        printf("[*] Detected Constant Multiplier (x%d)\n", k);
+        build_const_multiplier_gen(c, k); return true;
+    }
+	
     // Tier 2 (Arithmetic)
 	if (detect_squaring(outputs, num_inputs, num_outputs)) {
 	    printf("[*] Detected SQUARING!\n");
@@ -6978,6 +7692,19 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     }
     
     /* === TIER 1: Complex Arithmetic === */
+    
+    /* === TIER 2: Constant Multiplier (General) === */
+	if (detect_const_mult_general(outputs, num_inputs, num_outputs)) {
+    	printf("[*] Detected CONSTANT MULTIPLIER (x%d)!\n", g_detected_mult_const);
+    	build_const_mult_general(c);
+    	return true;
+	}
+    if (detect_const_mult_k5(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected CONSTANT MULTIPLIER (x5)!\n");
+        build_const_mult_k5(c);
+        return true;
+    }
+        
     if (detect_multiplier(outputs, num_inputs, num_outputs)) {
         printf("[*] Detected MULTIPLIER (%dx%d)!\n", num_inputs/2, num_inputs/2);
         build_array_multiplier(c, num_inputs / 2);
@@ -7007,6 +7734,15 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     }
     
     /* === TIER 3: Single-Operand Arithmetic === */
+    // Barrel Shifter Detection (Sparse check allows incomplete truth tables)
+    int shift_bits = 0;
+    while ((1 << shift_bits) < num_outputs) shift_bits++;
+    if (detect_barrel_shift_sparse(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected Barrel Shifter (Sparse Check)\n");
+        int shift_bits = 0; while ((1 << shift_bits) < num_outputs) shift_bits++;
+        build_barrel_shifter_optimized(c, num_outputs, shift_bits);
+        return true;
+    }
     if (detect_incrementer(outputs, num_inputs, num_outputs)) {
         printf("[*] Detected INCREMENTER!\n");
         build_incrementer(c, num_inputs);
@@ -7027,7 +7763,9 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
         build_abs(c, num_inputs);
         return true;
     }
-    
+
+    // Check if input size matches data + shift bits
+
     /* === TIER 4: Comparators === */
     if (detect_equality(outputs, num_inputs, num_outputs)) {
         printf("[*] Detected EQUALITY!\n");
@@ -7048,6 +7786,10 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
         printf("[*] Detected IS-ZERO!\n");
         build_is_zero(c, num_inputs);
         return true;
+    }
+    if (detect_integer_division(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected Integer Division (Using Recursive Solver)\n");
+        // Fall through to Recursive Solver below, it handles division best
     }
     
     /* === TIER 5: Bit Counting === */
@@ -7164,13 +7906,7 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
         build_mux2to1(c, num_outputs);
         return true;
     }
-    if (detect_barrel_shift_left(outputs, num_inputs, num_outputs)) {
-        int shift_bits = 0;
-        while ((1 << shift_bits) < num_outputs) shift_bits++;
-        printf("[*] Detected BARREL SHIFTER!\n");
-        build_barrel_shift_left(c, num_outputs, shift_bits);
-        return true;
-    }
+
     
     /* === TIER 10: Simple Transforms === */
     if (detect_left_shift_1(outputs, num_inputs, num_outputs)) {
@@ -7213,25 +7949,28 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
         build_parity(c, num_inputs);
         return true;
     }
-    printf("[*] Analyzing variable correlations to optimize order...\n");
     
+    
+    printf("[*] No specific math pattern found. Using Smart Universal Solver...\n");
+    
+    // 1. Analyze input correlations to find the best variable order
     int *perm = (int*)malloc(sizeof(int) * num_inputs);
     compute_smart_ordering(outputs, num_inputs, num_outputs, perm);
     
-    printf("[*] Running Universal Recursive Solver (Smart Reordering)...\n");
-    circ_memo_reset();
+    // 2. Reset the logic cache (Memoization)
+    circ_memo_reset(); 
     
+    // 3. Build each output
     for (int i = 0; i < num_outputs; i++) {
-        /* Permute the truth table according to the smart order */
-        /* This physically rearranges columns so 'related' vars are at top */
+        // Permute the truth table columns to match the smart order
         TT *permuted_tt = tt_permute_cols(outputs[i], perm, num_inputs);
         
-        /* Build logic using the permuted table */
-        /* Pass 'perm' so the solver knows which wire ID to use for splits */
-        c->output_map[i] = build_recursive_msb(c, permuted_tt, 0, perm);
+        // Synthesize logic using the cache to share gates
+        c->output_map[i] = build_recursive_strashed(c, permuted_tt, 0, perm);
         
         free_tt(permuted_tt);
         
+        // Safety check to prevent crashing on massive tables
         if (c->num_gates >= MAX_EVOL_GATES - 100) {
             printf("[!] Universal Solver hit gate limit. Aborting.\n");
             free(perm);
@@ -7240,23 +7979,22 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     }
     
     free(perm);
-    circ_memo_reset();
-    printf("    Universal Solver generated %d gates.\n", c->num_gates);
+    circ_memo_reset(); // Clean up memory
+    printf("    Structural Solver generated %d gates (Shared Logic enabled).\n", c->num_gates);
+    
     return true;
 }
 
 
 
-
-
-
-
-
+#include <windows.h>
 /* ============================================================
  * MAIN FUNCTION
  * ============================================================ */
 
 int main() {
+	// Add this line right at the start:
+    SetConsoleOutputCP(CP_UTF8); 
     seed_rng(time(NULL));
     strncpy(g_chip_name, DEFAULT_CHIP_NAME, sizeof(g_chip_name) - 1);
     
@@ -7265,10 +8003,9 @@ int main() {
 #endif
 
     // NOTE: Should be wrapped in strdup(); on literal unless a generator is with heap is used
-    char *truth_table = strdup("0000:1111110 0001:0110000 0010:1101101 0011:1111001 "
-        "0100:0110011 0101:1011011 0110:1011111 0111:1110000 "
-        "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
-        "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX");
+char *truth_table = strdup(
+    "00001:000 00101:001 01001:010 01101:011 10001:100 10101:101 11001:110 11101:111 "
+    "00010:000 01010:001 10010:010 11010:011 00011:000 01111:001 11011:010 00000:111");
     const char *allowed_gates = "ALL";
     
     
