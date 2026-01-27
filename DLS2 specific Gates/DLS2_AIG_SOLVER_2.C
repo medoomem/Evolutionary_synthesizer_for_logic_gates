@@ -2517,16 +2517,16 @@ void load_dls2_pin_mappings(void) {
 
 static LayoutConfig get_default_layout_config(void) {
     return (LayoutConfig){
-        .gate_width = 0.85f,
-        .gate_height = 0.55f,
-        .column_spacing = 5.0f,
-        .alley_width = 2.8f,
-        .min_gate_v_spacing = 3.0f,
-        .lane_spacing = 0.25f,
-        .input_v_spacing = 1.5f,
-        .output_v_spacing = 1.5f,
-        .pin_margin_x = 4.5f,
-        .chip_padding = 1.0f,
+        .gate_width = 0.8f,
+        .gate_height = 0.8f,
+        .column_spacing = 6.0f,    // Increase this to give wires a wider "street"
+        .alley_width = 3.0f,
+        .min_gate_v_spacing = 3.5f, // CRITICAL: Gives space for the "Vertical Jog"
+        .lane_spacing = 0.2f,      // Keeps parallel wires visible
+        .input_v_spacing = 1.2f,
+        .output_v_spacing = 1.2f,
+        .pin_margin_x = 1.0f,
+        .chip_padding = 1.5f,
         .chip_color_r = 0.22f, 
         .chip_color_g = 0.32f, 
         .chip_color_b = 0.48f
@@ -2702,53 +2702,35 @@ static void write_wire_alleyway(
     LayoutConfig *cfg,
     bool is_last
 ) {
+    // Determine the alleys next to source and target
+    int alley_idx = (src_depth == -1) ? 0 : src_depth + 1;
+    if (alley_idx >= grid->num_alleys) alley_idx = grid->num_alleys - 1;
+
+    // Use the lane index to create a unique "Safe Y" 
+    // This forces the horizontal part of the wire to happen 
+    // ABOVE or BELOW the actual row of gates so it doesn't hit them.
+    int lane = grid->alley_lane[alley_idx]++;
+    float vertical_jog = ( (lane % 10) - 5) * cfg->lane_spacing;
+    float safe_y = src_y + vertical_jog;
+
+    // The horizontal "Alley" X for vertical travel
+    float route_x = grid->alley_x[alley_idx] + (vertical_jog * 0.5f);
+
     fprintf(f, "    {\n");
     fprintf(f, "      \"SourcePinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", src_pin, src_owner);
     fprintf(f, "      \"TargetPinAddress\":{\"PinID\":%d,\"PinOwnerID\":%d},\n", tgt_pin, tgt_owner);
     fprintf(f, "      \"ConnectionType\":0,\n");
-    fprintf(f, "      \"ConnectedWireIndex\":-1,\n");
-    fprintf(f, "      \"ConnectedWireSegmentIndex\":-1,\n");
-
-    float dy = tgt_y - src_y;
-    float dx = tgt_x - src_x;
-
-    if (absf(dy) < 0.3f && absf(dx) < 1.5f) {
-        fprintf(f, "      \"Points\":[{\"x\":0.0,\"y\":0.0},{\"x\":0.0,\"y\":0.0}]\n");
-    } else {
-        int alley_idx;
-
-        if (src_depth == -1) {
-            alley_idx = 0;
-        }
-        else if (tgt_depth == -2) {
-            alley_idx = grid->num_alleys - 1;
-        }
-        else {
-            alley_idx = (src_depth + tgt_depth + 1) / 2;
-        }
-
-        if (alley_idx < 0) alley_idx = 0;
-        if (alley_idx >= grid->num_alleys) alley_idx = grid->num_alleys - 1;
-
-        int lane = grid->alley_lane[alley_idx]++;
-
-        float lane_offset = (lane % 2 == 0)
-            ? (float)(lane / 2) * cfg->lane_spacing
-            : -(float)((lane + 1) / 2) * cfg->lane_spacing;
-
-        float alley_center = grid->alley_x[alley_idx];
-        float route_x = alley_center + lane_offset;
-
-        float half_alley = cfg->alley_width / 2.0f - 0.1f;
-        route_x = maxf(alley_center - half_alley, minf(alley_center + half_alley, route_x));
-
-        fprintf(f, "      \"Points\":[");
-        fprintf(f, "{\"x\":0.0,\"y\":0.0},");
-        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", route_x, src_y);
-        fprintf(f, "{\"x\":%.4f,\"y\":%.4f},", route_x, tgt_y);
-        fprintf(f, "{\"x\":0.0,\"y\":0.0}]\n");
-    }
-
+    fprintf(f, "      \"Points\":[\n");
+    
+    // 6-POINT "INDUSTRIAL" ROUTE
+    fprintf(f, "        {\"x\":%.4f,\"y\":%.4f},\n", src_x, src_y);           // 1. Start at Pin
+    fprintf(f, "        {\"x\":%.4f,\"y\":%.4f},\n", src_x + 0.4f, src_y);    // 2. Step Out
+    fprintf(f, "        {\"x\":%.4f,\"y\":%.4f},\n", src_x + 0.4f, safe_y);   // 3. Jog to Safe Height
+    fprintf(f, "        {\"x\":%.4f,\"y\":%.4f},\n", route_x, safe_y);        // 4. Horizontal Travel
+    fprintf(f, "        {\"x\":%.4f,\"y\":%.4f},\n", route_x, tgt_y);         // 5. Vertical Trunk
+    fprintf(f, "        {\"x\":%.4f,\"y\":%.4f}\n",  tgt_x, tgt_y);           // 6. Into Target Pin
+    
+    fprintf(f, "      ]\n");
     fprintf(f, "    }%s\n", is_last ? "" : ",");
 }
 
@@ -2966,7 +2948,9 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
         printf("Error: Cannot open %s\n", filename);
         return;
     }
-
+	
+	
+	
     /* FIX: Heap allocation to prevent stack overflow */
     int alloc_size = (c->num_gates > 0) ? c->num_gates : 1;
     
@@ -3044,22 +3028,35 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
         bbox_add_point(&bbox, grid.alley_x[i], alley_y_extent, 0.1f);
         bbox_add_point(&bbox, grid.alley_x[i], -alley_y_extent, 0.1f);
     }
+	for (int i = 0; i < grid.num_alleys; i++) {
+    	grid.alley_lane[i] = 0; 
+	}
+	// Calculate bounding box first
+	float content_width = bbox.max_x - bbox.min_x;
+	float content_height = bbox.max_y - bbox.min_y;
 
-    float content_width = bbox.max_x - bbox.min_x;
-    float content_height = bbox.max_y - bbox.min_y;
+	// DLS2 expects the "Size" to contain the components.
+	// We scale the chip size to be exactly what is needed for these coordinates.
+	float chip_width = (content_width / 10.0f) + cfg.chip_padding; // Scale coords down for the header
+	float chip_height = (content_height / 10.0f) + cfg.chip_padding;
 
-    float chip_width = (content_width / 12.0f) + cfg.chip_padding;
-    float chip_height = (content_height / 8.0f) + cfg.chip_padding;
+	// FORCE SANE BOX LIMITS
 
+
+
+	
     chip_width = maxf(0.5f, minf(chip_width, 4.0f));
     chip_height = maxf(0.5f, minf(chip_height, 4.0f));
+    if (chip_width < 1.0f) chip_width = 1.0f;
+	if (chip_height < 1.0f) chip_height = 1.0f;
 
     fprintf(f, "{\n");
     fprintf(f, "  \"DLSVersion\": \"2.1.6\",\n");
     fprintf(f, "  \"Name\": \"%s\",\n", g_chip_name);
     fprintf(f, "  \"NameLocation\": 0,\n");
     fprintf(f, "  \"ChipType\": 0,\n");
-    fprintf(f, "  \"Size\": {\"x\": %.3f, \"y\": %.3f},\n", chip_width, chip_height);
+	// Write the Header (Use the calculated sizes)
+	fprintf(f, "  \"Size\": {\"x\": %.3f, \"y\": %.3f},\n", chip_width, chip_height);
     fprintf(f, "  \"Colour\": {\"r\": %.3f, \"g\": %.3f, \"b\": %.3f, \"a\": 1},\n",
             cfg.chip_color_r, cfg.chip_color_g, cfg.chip_color_b);
 
@@ -8376,6 +8373,8 @@ int main() {
         "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
         "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX"
 		);
+		
+		
     const char *allowed_gates = "ALL";
     
     
