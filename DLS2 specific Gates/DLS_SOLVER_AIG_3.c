@@ -21,7 +21,7 @@
 
 /* Evolution parameters (only used if ENABLE_EVOLUTIONARY_REFINEMENT = 1) */
 #define EVO_MAX_GENERATIONS         100000  /* Max generations before timeout */
-#define EVO_TERMINATION_PLATEAU     20000  /* Stop if no improvement for this many gens */
+#define EVO_TERMINATION_PLATEAU     5000  /* Stop if no improvement for this many gens */
 #define EVO_KICK_THRESHOLD          200000   /* Generations before soft kick */
 #define EVO_PRINT_INTERVAL          500000   /* Progress print frequency */
 
@@ -77,6 +77,57 @@ const char* OP_NAMES[] = { "AND", "OR", "XOR", "NOT", "NAND", "NOR", "XNOR" };
 #define DLS2_HEIGHT_MULTIPLIER 0.35f
 #define DLS2_BASE_HEIGHT 0.5f
 #define PROJECT_DESC_PATH "../ProjectDescription.json"
+
+
+
+
+
+
+
+
+
+
+char* read_file_to_string(const char* filename) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *string = malloc(fsize + 1);
+    fread(string, fsize, 1, f);
+    fclose(f);
+    string[fsize] = 0;
+    return string;
+}
+
+
+void load_settings_from_file(const char* filename, char* tt_file, char* gates, char* name, int* evo) {
+    FILE* f = fopen(filename, "r");
+    if (!f) {
+        printf("[!] config.txt not found! Using defaults.\n");
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue; // Skip comments/empty lines
+        char key[64], val[256];
+        if (sscanf(line, "%63[^=]=%255s", key, val) == 2) {
+            if (strcmp(key, "TRUTH_TABLE_FILE") == 0) strcpy(tt_file, val);
+            if (strcmp(key, "ALLOWED_GATES") == 0) {
+                // Allowed gates often have spaces, so we handle them specially
+                char* s = strchr(line, '=') + 1;
+                strcpy(gates, s);
+                gates[strcspn(gates, "\r\n")] = 0; // Clean newline
+            }
+            if (strcmp(key, "CHIP_NAME") == 0) strcpy(name, val);
+            if (strcmp(key, "ENABLE_EVO") == 0) *evo = atoi(val);
+        }
+    }
+    fclose(f);
+}
+
+
+
 
 /* ============================================================
  * CORE DATA STRUCTURES
@@ -2732,190 +2783,172 @@ static void get_iso_timestamp(char* buffer, size_t size) {
     strftime(buffer, size, "%Y-%m-%dT%H:%M:%S.000+00:00", tm_info);
 }
 
+
+
+
+/* ============================================================
+ * FIXED ROBUST JSON PROJECT UPDATER
+ * ============================================================ */
+
+static const char* find_array_end(const char* arr_start) {
+    if (!arr_start || *arr_start != '[') return NULL;
+    int depth = 1;
+    const char* p = arr_start + 1;
+    while (*p && depth > 0) {
+        if (*p == '[') depth++;
+        else if (*p == ']') depth--;
+        p++;
+    }
+    return (depth == 0) ? (p - 1) : NULL;
+}
+
+// Literal check: Does the string "name" (with quotes) exist between start and end?
+static bool name_exists_in_range(const char* start, const char* end, const char* name) {
+    char search[256];
+    snprintf(search, sizeof(search), "\"%s\"", name);
+    const char* p = strstr(start, search);
+    // If found AND the start of the match is before the end of the search range
+    if (p && p < end) return true;
+    return false;
+}
+
+static bool needs_preceding_comma(const char* start, const char* insertion_point) {
+    const char* p = insertion_point - 1;
+    // Skip backwards over whitespace, tabs, and newlines
+    while (p > start && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p--;
+    
+    // If the last functional character was a comma or the start of the array/object, 
+    // we do NOT need a comma.
+    if (*p == ',' || *p == '[' || *p == '{' || *p == ':') return false;
+    return true;
+}
+
 static bool insert_at(char* json, size_t pos, const char* insert, size_t json_buf_size) {
     size_t json_len = strlen(json);
     size_t insert_len = strlen(insert);
-
-    if (json_len + insert_len >= json_buf_size) {
-        return false;
-    }
-
+    if (json_len + insert_len >= json_buf_size) return false;
     memmove(json + pos + insert_len, json + pos, json_len - pos + 1);
     memcpy(json + pos, insert, insert_len);
     return true;
 }
 
-static bool name_exists_in_range(const char* start, const char* end, const char* name) {
-    if (!start || !end || end <= start) return false;
-
-    char search[256];
-    snprintf(search, sizeof(search), "\"%s\"", name);
-
-    const char* found = start;
-    while ((found = strstr(found, search)) != NULL) {
-        if (found < end) {
-            return true;
-        }
-        break;
-    }
-    return false;
-}
-
-static const char* find_array_end(const char* arr_start) {
-    if (!arr_start || *arr_start != '[') return NULL;
-
-    int depth = 1;
-    const char* p = arr_start + 1;
-
-    while (*p && depth > 0) {
-        if (*p == '[' || *p == '{') depth++;
-        else if (*p == ']' || *p == '}') depth--;
-        if (depth > 0) p++;
-    }
-
-    return (depth == 0) ? p : NULL;
-}
-
 bool update_project_description(const char* chip_name) {
-    if (!chip_name || strlen(chip_name) == 0) {
-        return false;
-    }
+    if (!chip_name || strlen(chip_name) == 0) return false;
 
     FILE* f = fopen(PROJECT_DESC_PATH, "r");
-    if (!f) {
-        printf("Warning: Could not open %s\n", PROJECT_DESC_PATH);
-        return false;
-    }
+    if (!f) return false;
 
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if (size <= 0) {
-        fclose(f);
-        return false;
-    }
-
-    size_t buf_size = size + 4096;
-    char* json = (char*)malloc(buf_size);
-    if (!json) {
-        fclose(f);
-        return false;
-    }
-    memset(json, 0, buf_size);
+    size_t buf_size = size + 8192; 
+    char* json = (char*)calloc(buf_size, 1);
+    if (!json) { fclose(f); return false; }
+    
     fread(json, 1, size, f);
     fclose(f);
 
     bool modified = false;
     char insert_buf[512];
 
+    // 1. Update Timestamp
     char timestamp[64];
     get_iso_timestamp(timestamp, sizeof(timestamp));
-
     const char* last_save = strstr(json, "\"LastSaveTime\"");
     if (last_save) {
-        const char* colon = strchr(last_save, ':');
-        if (colon) {
-            const char* quote1 = strchr(colon, '"');
-            if (quote1) {
-                const char* quote2 = strchr(quote1 + 1, '"');
-                if (quote2) {
-                    size_t new_len = strlen(timestamp);
-                    memmove((char*)quote1 + 1 + new_len, quote2, strlen(quote2) + 1);
-                    memcpy((char*)quote1 + 1, timestamp, new_len);
-                    modified = true;
-                }
+        const char* q1 = strchr(last_save, ':');
+        if (q1) q1 = strchr(q1, '"');
+        if (q1) {
+            const char* q2 = strchr(q1 + 1, '"');
+            if (q2) {
+                size_t new_len = strlen(timestamp);
+                size_t old_len = q2 - (q1 + 1);
+                memmove((char*)q1 + 1 + new_len, q2, strlen(q2) + 1);
+                memcpy((char*)q1 + 1, timestamp, new_len);
+                modified = true;
             }
         }
     }
 
+    // 2. Add to AllCustomChipNames (Array of Strings)
     const char* all_chips_key = strstr(json, "\"AllCustomChipNames\"");
     if (all_chips_key) {
-        const char* arr_start = strchr(all_chips_key, '[');
-        const char* arr_end = arr_start ? find_array_end(arr_start) : NULL;
-
-        if (arr_start && arr_end) {
-            if (!name_exists_in_range(arr_start, arr_end, chip_name)) {
-                snprintf(insert_buf, sizeof(insert_buf), ",\n    \"%s\"", chip_name);
-                size_t insert_pos = arr_end - json;
-                if (insert_at(json, insert_pos, insert_buf, buf_size)) {
-                    printf("  [ADD]  AllCustomChipNames: '%s'\n", chip_name);
-                    modified = true;
-                }
+        const char* start = strchr(all_chips_key, '[');
+        const char* end = find_array_end(start);
+        if (start && end && !name_exists_in_range(start, end, chip_name)) {
+            bool comma = needs_preceding_comma(start, end);
+            snprintf(insert_buf, sizeof(insert_buf), "%s\"%s\"", comma ? "," : "", chip_name);
+            if (insert_at(json, end - json, insert_buf, buf_size)) {
+                modified = true;
+                end = find_array_end(start); // Update end pointer for next section
             }
         }
     }
 
+    // 3. Add to StarredList (Array of Objects)
     const char* starred_key = strstr(json, "\"StarredList\"");
     if (starred_key) {
-        const char* arr_start = strchr(starred_key, '[');
-        const char* arr_end = arr_start ? find_array_end(arr_start) : NULL;
-
-        if (arr_start && arr_end) {
-            char name_search[256];
-            snprintf(name_search, sizeof(name_search), "\"Name\":\"%s\"", chip_name);
-
-            const char* found = strstr(arr_start, name_search);
-            if (!found || found >= arr_end) {
-                snprintf(insert_buf, sizeof(insert_buf),
-                         ",\n    {\n      \"Name\":\"%s\",\n      \"IsCollection\":false\n    }",
-                         chip_name);
-                size_t insert_pos = arr_end - json;
-                if (insert_at(json, insert_pos, insert_buf, buf_size)) {
-                    printf("  [ADD]  StarredList: '%s'\n", chip_name);
-                    modified = true;
-                }
+        const char* start = strchr(starred_key, '[');
+        const char* end = find_array_end(start);
+        if (start && end && !name_exists_in_range(start, end, chip_name)) {
+            bool comma = needs_preceding_comma(start, end);
+            snprintf(insert_buf, sizeof(insert_buf), 
+                "%s{\"Name\":\"%s\",\"IsCollection\":false}", comma ? "," : "", chip_name);
+            if (insert_at(json, end - json, insert_buf, buf_size)) {
+                modified = true;
+                end = find_array_end(start);
             }
         }
     }
 
-    const char* other_name = strstr(json, "\"Name\":\"OTHER\"");
-    if (other_name) {
-        const char* search_start = other_name - 500;
-        if (search_start < json) search_start = json;
-
-        const char* chips_key = NULL;
-        const char* p = other_name;
-        while (p > search_start) {
-            if (strncmp(p, "\"Chips\":[", 9) == 0) {
-                chips_key = p;
-                break;
-            }
-            p--;
-        }
-
-        if (chips_key) {
-            const char* chips_arr_start = strchr(chips_key, '[');
-            const char* chips_arr_end = chips_arr_start ? strchr(chips_arr_start, ']') : NULL;
-
-            if (chips_arr_start && chips_arr_end && chips_arr_end < other_name) {
-                if (!name_exists_in_range(chips_arr_start, chips_arr_end, chip_name)) {
-                    snprintf(insert_buf, sizeof(insert_buf), ",\"%s\"", chip_name);
-                    size_t insert_pos = chips_arr_end - json;
-                    if (insert_at(json, insert_pos, insert_buf, buf_size)) {
-                        printf("  [ADD]  OTHER collection: '%s'\n", chip_name);
-                        modified = true;
+    // 4. Add to OTHER Collection inside ChipCollections
+    const char* collections_key = strstr(json, "\"ChipCollections\"");
+    if (collections_key) {
+        const char* start = strchr(collections_key, '[');
+        const char* end = find_array_end(start);
+        if (start && end) {
+            // Find "OTHER" specifically
+            const char* other_name = strstr(start, "\"Name\":\"OTHER\"");
+            if (other_name && other_name < end) {
+                // Find "Chips" array inside this specific object
+                const char* obj_start = other_name;
+                while (obj_start > start && *obj_start != '{') obj_start--;
+                const char* chips_array_start = strstr(obj_start, "\"Chips\"");
+                if (chips_array_start) {
+                    const char* list_start = strchr(chips_array_start, '[');
+                    const char* list_end = find_array_end(list_start);
+                    if (list_start && list_end && !name_exists_in_range(list_start, list_end, chip_name)) {
+                        bool comma = needs_preceding_comma(list_start, list_end);
+                        snprintf(insert_buf, sizeof(insert_buf), "%s\"%s\"", comma ? "," : "", chip_name);
+                        if (insert_at(json, list_end - json, insert_buf, buf_size)) modified = true;
                     }
                 }
+            } else {
+                // "OTHER" doesn't exist, create it
+                bool comma = needs_preceding_comma(start, end);
+                snprintf(insert_buf, sizeof(insert_buf), 
+                    "%s{\"Chips\":[\"%s\"],\"IsToggledOpen\":true,\"Name\":\"OTHER\"}", 
+                    comma ? "," : "", chip_name);
+                if (insert_at(json, end - json, insert_buf, buf_size)) modified = true;
             }
         }
     }
 
     if (modified) {
         f = fopen(PROJECT_DESC_PATH, "w");
-        if (!f) {
-            free(json);
-            return false;
+        if (f) {
+            fputs(json, f);
+            fclose(f);
+            printf("[SUCCESS] ProjectDescription.json updated (No Duplicates).\n");
         }
-        fputs(json, f);
-        fclose(f);
-        printf("ProjectDescription.json updated successfully!\n");
+    } else {
+        printf("[INFO] Chip '%s' already exists in ProjectDescription.json.\n", chip_name);
     }
 
     free(json);
     return true;
 }
-
 
 
 
@@ -8656,44 +8689,7 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
 }
 
 
-char* read_file_to_string(const char* filename) {
-    FILE *f = fopen(filename, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *string = malloc(fsize + 1);
-    fread(string, fsize, 1, f);
-    fclose(f);
-    string[fsize] = 0;
-    return string;
-}
 
-
-void load_settings_from_file(const char* filename, char* tt_file, char* gates, char* name, int* evo) {
-    FILE* f = fopen(filename, "r");
-    if (!f) {
-        printf("[!] config.txt not found! Using defaults.\n");
-        return;
-    }
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n') continue; // Skip comments/empty lines
-        char key[64], val[256];
-        if (sscanf(line, "%63[^=]=%255s", key, val) == 2) {
-            if (strcmp(key, "TRUTH_TABLE_FILE") == 0) strcpy(tt_file, val);
-            if (strcmp(key, "ALLOWED_GATES") == 0) {
-                // Allowed gates often have spaces, so we handle them specially
-                char* s = strchr(line, '=') + 1;
-                strcpy(gates, s);
-                gates[strcspn(gates, "\r\n")] = 0; // Clean newline
-            }
-            if (strcmp(key, "CHIP_NAME") == 0) strcpy(name, val);
-            if (strcmp(key, "ENABLE_EVO") == 0) *evo = atoi(val);
-        }
-    }
-    fclose(f);
-}
 
 
 //#include <windows.h>
