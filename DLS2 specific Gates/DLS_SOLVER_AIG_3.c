@@ -8656,49 +8656,88 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
 }
 
 
+char* read_file_to_string(const char* filename) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *string = malloc(fsize + 1);
+    fread(string, fsize, 1, f);
+    fclose(f);
+    string[fsize] = 0;
+    return string;
+}
 
-#include <windows.h>
+
+void load_settings_from_file(const char* filename, char* tt_file, char* gates, char* name, int* evo) {
+    FILE* f = fopen(filename, "r");
+    if (!f) {
+        printf("[!] config.txt not found! Using defaults.\n");
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue; // Skip comments/empty lines
+        char key[64], val[256];
+        if (sscanf(line, "%63[^=]=%255s", key, val) == 2) {
+            if (strcmp(key, "TRUTH_TABLE_FILE") == 0) strcpy(tt_file, val);
+            if (strcmp(key, "ALLOWED_GATES") == 0) {
+                // Allowed gates often have spaces, so we handle them specially
+                char* s = strchr(line, '=') + 1;
+                strcpy(gates, s);
+                gates[strcspn(gates, "\r\n")] = 0; // Clean newline
+            }
+            if (strcmp(key, "CHIP_NAME") == 0) strcpy(name, val);
+            if (strcmp(key, "ENABLE_EVO") == 0) *evo = atoi(val);
+        }
+    }
+    fclose(f);
+}
+
+
+//#include <windows.h>
 /* ============================================================
  * MAIN FUNCTION
  * ============================================================ */
 
 int main() {
-	// Add this line right at the start:
-    SetConsoleOutputCP(CP_UTF8); 
+//    SetConsoleOutputCP(CP_UTF8);
     seed_rng(time(NULL));
-    strncpy(g_chip_name, DEFAULT_CHIP_NAME, sizeof(g_chip_name) - 1);
-    
-#if ENABLE_DLS2_EXPORT
-    load_dls2_pin_mappings();
-#endif
 
-    // NOTE: Should be wrapped in strdup(); on literal unless a generator is with heap is used
-	char *truth_table = strdup(
-		"0000:1111110 0001:0110000 0010:1101101 0011:1111001 "
-        "0100:0110011 0101:1011011 0110:1011111 0111:1110000 "
-        "1000:1111111 1001:1111011 1010:XXXXXXX 1011:XXXXXXX "
-        "1100:XXXXXXX 1101:XXXXXXX 1110:XXXXXXX 1111:XXXXXXX"
-		);
-    const char *allowed_gates = "ALL";
-    
-    
-    
-    
-    printf("============================================================\n");
-    printf("   HYBRID AIG + CGP OPTIMIZER WITH DLS2 EXPORT             \n");
-    printf("============================================================\n");
-    printf("   Config: Structural=%d  Evolution=%d  TechMap=%d  DLS2=%d\n",
-           ENABLE_STRUCTURAL_DETECTION, ENABLE_EVOLUTIONARY_REFINEMENT,
-           ENABLE_TECHNOLOGY_MAPPING, ENABLE_DLS2_EXPORT);
-    printf("============================================================\n\n");
+    // 1. Default Settings (if config.txt is missing)
+    char tt_filename[256] = "chaos_tt.txt";
+    char allowed_gates[256] = "ALL";
+    char chip_name[64] = "AUTO_CHIP";
+    int enable_evo = 0;
+
+    // 2. Load settings from config.txt
+    load_settings_from_file("config.txt", tt_filename, allowed_gates, chip_name, &enable_evo);
+    strncpy(g_chip_name, chip_name, sizeof(g_chip_name) - 1);
+
+    printf("=== SETTINGS LOADED ===\n");
+    printf(" Chip Name: %s\n", g_chip_name);
+    printf(" TT File:   %s\n", tt_filename);
+    printf(" Gates:     %s\n", allowed_gates);
+    printf(" Evo Mode:  %s\n", enable_evo ? "ON" : "OFF");
+    printf("========================\n\n");
+
+    #if ENABLE_DLS2_EXPORT
+        load_dls2_pin_mappings();
+    #endif
+
+    // 3. Load the actual Truth Table data
+    char *truth_table = read_file_to_string(tt_filename);
+    if (!truth_table) {
+        printf("[ERROR] Could not find Truth Table file: %s\n", tt_filename);
+        return 1;
+    }
 
     parse_allowed_gates(allowed_gates);
     
-    // Heap allocation for large output tables
     TT *outputs[MAX_OUTPUTS]; 
     parse_truth_table(truth_table, outputs);
     
-    // Prepare Targets
     int total_rows = 1 << num_inputs;
     g_num_chunks = (total_rows + 63) / 64; 
     
@@ -8813,13 +8852,12 @@ int main() {
     optimize_circuit(evo_circuit);
 #endif
 
-#if ENABLE_EVOLUTIONARY_REFINEMENT
-    /* Evolutionary refinement */
+if (enable_evo == 1) {
     run_evolutionary_refinement(inputs_vec, g_targets, g_masks, g_num_chunks, evo_circuit);
-#else
-    printf("[*] Evolutionary refinement DISABLED\n");
+} else {
+    printf("[*] Evolutionary refinement DISABLED in config.txt\n");
     printf("[*] Final circuit: %d gates\n", circuit_count_active(evo_circuit));
-#endif
+}
     
 #if ENABLE_NETLIST_PRINT
     /* Output results */
