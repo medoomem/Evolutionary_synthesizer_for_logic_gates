@@ -17,7 +17,7 @@
 #define ENABLE_STRUCTURAL_DETECTION     1    /* Try pattern detection before AIG */
 #define ENABLE_TECHNOLOGY_MAPPING       1    /* Convert to allowed gate set */
 #define ENABLE_DLS2_EXPORT              1    /* Export JSON for Digital Logic Sim 2 */
-#define ENABLE_NETLIST_PRINT            1    /* Print circuit netlist to console */
+#define ENABLE_NETLIST_PRINT            0    /* Print circuit netlist to console */
 
 /* Evolution parameters (only used if ENABLE_EVOLUTIONARY_REFINEMENT = 1) */
 #define EVO_MAX_GENERATIONS         100000  /* Max generations before timeout */
@@ -3555,15 +3555,15 @@ void render_dls2_json(Circuit *c, int num_inputs_param, int num_outputs_param) {
 
     /* Print summary */
     printf("\n");
-    printf("╔════════════════════════════════════════════════════════════╗\n");
-    printf("║       DLS2 HIGHWAY ROUTING EXPORT (NEW!)                   ║\n");
-    printf("╠════════════════════════════════════════════════════════════╣\n");
-    printf("║  File: %-49s ║\n", filename);
-    printf("║  Chip Size: %.2f x %.2f                                    ║\n", chip_width, chip_height);
-    printf("║  Gates: %-3d    Depths: %-3d    Wires: %-3d                  ║\n",
+    printf("â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—\n");
+    printf("â•‘       DLS2 HIGHWAY ROUTING EXPORT (NEW!)                   â•‘\n");
+    printf("â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£\n");
+    printf("â•‘  File: %-49s â•‘\n", filename);
+    printf("â•‘  Chip Size: %.2f x %.2f                                    â•‘\n", chip_width, chip_height);
+    printf("â•‘  Gates: %-3d    Depths: %-3d    Wires: %-3d                  â•‘\n",
            gate_output_idx, max_depth + 1, total_wires);
-    printf("║  Highways: %-3d (zero gate-clipping guaranteed)            ║\n", highways->num_highways);
-    printf("╚════════════════════════════════════════════════════════════╝\n");
+    printf("â•‘  Highways: %-3d (zero gate-clipping guaranteed)            â•‘\n", highways->num_highways);
+    printf("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
 
     update_project_description(g_chip_name);
 
@@ -3779,35 +3779,45 @@ bool detect_adder(TT **outputs, int n_in, int n_out) {
 
 void build_ripple_carry_adder(Circuit *c, int n_bits) {
     int n = n_bits;
-    int sum[16];
-    int carry = -1;
+    int sum[32];    // Stores sum wires by significance (0=LSB, n-1=MSB)
+    int carry = -1; // Current carry wire
     
+    // Iterate from LSB (Significance 0) to MSB (Significance n-1)
     for (int i = 0; i < n; i++) {
-        int a_in = i;           /* A[i] */
-        int b_in = n + i;       /* B[i] */
+        // Map significance 'i' to physical input wire index.
+        // Assuming Input 0 is MSB and Input n-1 is LSB.
+        int a_in = (n - 1) - i;         // A's LSB is at index n-1
+        int b_in = (2 * n - 1) - i;     // B's LSB is at index 2n-1
         
         if (i == 0) {
-            /* Half adder for LSB */
+            /* Half adder for LSB (Bit 0) */
             sum[i] = circuit_add_gate_alive(c, EVO_XOR, a_in, b_in);
             carry = circuit_add_gate_alive(c, EVO_AND, a_in, b_in);
         } else {
-            /* Full adder */
+            /* Full adder for bits 1..n-1 */
             int axb = circuit_add_gate_alive(c, EVO_XOR, a_in, b_in);
+            
+            // Sum = (A ^ B) ^ Cin
             sum[i] = circuit_add_gate_alive(c, EVO_XOR, axb, carry);
+            
+            // Cout = (A & B) | (Cin & (A ^ B))
             int ab = circuit_add_gate_alive(c, EVO_AND, a_in, b_in);
-            int axb_c = circuit_add_gate_alive(c, EVO_AND, axb, carry);
-            carry = circuit_add_gate_alive(c, EVO_OR, ab, axb_c);
+            int cin_axb = circuit_add_gate_alive(c, EVO_AND, carry, axb);
+            carry = circuit_add_gate_alive(c, EVO_OR, ab, cin_axb);
         }
     }
     
-    /* Map outputs (MSB first) */
+    /* Map outputs (Output 0 is MSB) */
     int out_bits = c->num_outputs;
+    
     if (out_bits == n + 1) {
-        c->output_map[0] = carry;
+        c->output_map[0] = carry; // MSB is Carry Out
         for (int i = 0; i < n; i++) {
+            // Map remaining outputs from Sum MSB (sum[n-1]) down to Sum LSB (sum[0])
             c->output_map[i + 1] = sum[n - 1 - i];
         }
     } else {
+        // If no carry out pin requested, just map sums
         for (int i = 0; i < n; i++) {
             c->output_map[i] = sum[n - 1 - i];
         }
@@ -8287,6 +8297,301 @@ void build_bus_pass(Circuit *c, int n) {
 }
 
 
+
+
+
+
+
+
+/* ============================================================
+ * COMPARATOR (A >= B)
+ * Based on Python script: B is upper bits, A is lower bits.
+ * ============================================================ */
+
+bool detect_ge_comparator(TT **outputs, int n_in, int n_out) {
+    /* Expecting even number of inputs and 1 output */
+    if (n_in % 2 != 0 || n_out != 1) return false;
+    int n = n_in / 2;
+    int total_rows = 1 << n_in;
+    
+    /* Python script logic mapping: 
+       i >> 8 is B (Upper bits), i & 0xFF is A (Lower bits).
+       In our C iteration, Input 0 is MSB. 
+       So Inputs 0..(n-1) are B, Inputs n..(2n-1) are A. */
+
+    for (int row = 0; row < total_rows; row++) {
+        int b = 0, a = 0;
+        
+        // Extract B (First n inputs)
+        for (int i = 0; i < n; i++) {
+            b = (b << 1) | ((row >> (n_in - 1 - i)) & 1);
+        }
+        
+        // Extract A (Next n inputs)
+        for (int i = 0; i < n; i++) {
+            a = (a << 1) | ((row >> (n - 1 - i)) & 1);
+        }
+        
+        int expected = (a >= b) ? 1 : 0;
+        
+        if (tt_get_bit(outputs[0], row) != expected)
+            return false;
+    }
+    return true;
+}
+
+void build_ge_comparator(Circuit *c, int n_bits) {
+    int n = n_bits;
+    // We need to determine if A >= B.
+    // This is equivalent to NOT (A < B).
+    // A < B occurs if A - B generates a Borrow.
+    // So Output = NOT(Borrow_out).
+    
+    int borrow = -1; // -1 represents constant 0 initially
+
+    // Inputs 0..(n-1) are B
+    // Inputs n..(2n-1) are A
+    // We process from LSB (index n-1 relative to start) to MSB (index 0)
+    
+    for (int i = 0; i < n; i++) {
+        // Working from LSB up to MSB
+        int bit_idx = n - 1 - i; 
+        
+        int b_in = bit_idx;      // B[i]
+        int a_in = n + bit_idx;  // A[i]
+        
+        // Full Subtractor Logic for Borrow:
+        // Borrow_out = (~A & B) | (~(A ^ B) & Borrow_in)
+        // Simplified structural build:
+        
+        if (i == 0) {
+            // Half Subtractor for LSB: Borrow = ~A & B
+            int not_a = circuit_add_gate_alive(c, EVO_NOT, a_in, 0);
+            borrow = circuit_add_gate_alive(c, EVO_AND, not_a, b_in);
+        } else {
+            // Full Subtractor Borrow
+            int axb = circuit_add_gate_alive(c, EVO_XOR, a_in, b_in);
+            int not_a = circuit_add_gate_alive(c, EVO_NOT, a_in, 0);
+            int not_axb = circuit_add_gate_alive(c, EVO_NOT, axb, 0);
+            
+            // Term 1: ~A & B
+            int t1 = circuit_add_gate_alive(c, EVO_AND, not_a, b_in);
+            // Term 2: ~(A^B) & Borrow_in
+            int t2 = circuit_add_gate_alive(c, EVO_AND, not_axb, borrow);
+            
+            borrow = circuit_add_gate_alive(c, EVO_OR, t1, t2);
+        }
+    }
+    
+    // Result is A >= B, which is NOT(Borrow)
+    // If Borrow is 1, A < B. If Borrow is 0, A >= B.
+    c->output_map[0] = circuit_add_gate_alive(c, EVO_NOT, borrow, 0);
+}
+
+
+/* ============================================================
+ * CONDITIONAL ADDER (Q_final = Q_guess + CorrectionBit)
+ * Based on Python script: Input 0 is Correction, Rest are Q.
+ * ============================================================ */
+
+bool detect_conditional_adder(TT **outputs, int n_in, int n_out) {
+    // Expecting n_out = n_in - 1 (Assuming carry-out is dropped based on your Python script logic & 0xFF)
+    if (n_out != n_in - 1) return false;
+    
+    int data_bits = n_out;
+    int total_rows = 1 << n_in;
+    int mask = (1 << data_bits) - 1;
+
+    for (int row = 0; row < total_rows; row++) {
+        // Python: correction_bit = (i >> 8) -> This is MSB (Input 0)
+        int correction = (row >> data_bits) & 1;
+        
+        // Python: q_guess = i & 0xFF -> These are lower bits
+        int q_guess = row & mask;
+        
+        // Logic: q + correction (modulo mask)
+        int expected = (q_guess + correction) & mask;
+        
+        for (int bit = 0; bit < data_bits; bit++) {
+            // Check bits. Output 0 is MSB.
+            int output_idx = data_bits - 1 - bit;
+            if (tt_get_bit(outputs[output_idx], row) != ((expected >> bit) & 1))
+                return false;
+        }
+    }
+    return true;
+}
+
+void build_conditional_adder(Circuit *c, int n_in) {
+    int data_bits = n_in - 1;
+    int correction_wire = 0; // Input 0 is the flag
+    
+    // Previous carry starts as the correction bit
+    int carry = correction_wire;
+    int sum[32];
+
+    // Ripple carry from LSB (last input) to MSB (input 1)
+    for (int i = 0; i < data_bits; i++) {
+        int bit_idx = n_in - 1 - i; // Input index for current data bit
+        
+        // Half Adder: Sum = A ^ Carry, NewCarry = A & Carry
+        sum[i] = circuit_add_gate_alive(c, EVO_XOR, bit_idx, carry);
+        carry = circuit_add_gate_alive(c, EVO_AND, bit_idx, carry);
+    }
+
+    // Map outputs (MSB first)
+    // sum[0] is LSB, sum[data_bits-1] is MSB
+    for (int i = 0; i < data_bits; i++) {
+        c->output_map[i] = sum[data_bits - 1 - i];
+    }
+}
+
+
+
+
+
+
+/* ============================================================
+ * 2-BIT SMART CORRECTOR
+ * Inputs: Divisor (High Byte), Remainder (Low Byte)
+ * Logic:
+ *   If Div == 0: 0
+ *   Else If Rem >= (Div * 2): 2 (Binary 10)
+ *   Else If Rem >= Div:       1 (Binary 01)
+ *   Else:                     0 (Binary 00)
+ * ============================================================ */
+
+bool detect_smart_corrector(TT **outputs, int n_in, int n_out) {
+    if (n_in != 16 || n_out != 2) return false;
+
+    int total_rows = 1 << 16; /* Iterate full 16-bit space */
+
+    for (int r = 0; r < total_rows; r++) {
+        /* Extract Divisor (High Byte) and Remainder (Low Byte) */
+        /* In C truth table context:
+           Input 0 is MSB (bit 15), Input 15 is LSB (bit 0) */
+        
+        int divisor = (r >> 8) & 0xFF;
+        int remainder = r & 0xFF;
+
+        int correction = 0;
+
+        if (divisor == 0) {
+            correction = 0;
+        } else {
+            if (remainder >= (divisor * 2)) {
+                correction = 2; // Binary 10
+            } else if (remainder >= divisor) {
+                correction = 1; // Binary 01
+            } else {
+                correction = 0; // Binary 00
+            }
+        }
+
+        /* Check Output 0 (MSB of correction) */
+        if (tt_get_bit(outputs[0], r) != ((correction >> 1) & 1)) return false;
+        
+        /* Check Output 1 (LSB of correction) */
+        if (tt_get_bit(outputs[1], r) != (correction & 1)) return false;
+    }
+    return true;
+}
+
+/* 
+ * Helper: Builds A >= B using a borrow chain (A - B).
+ * Returns a wire index representing the boolean result.
+ * A_wires and B_wires are arrays of wire indices (MSB at index 0).
+ */
+int build_ge_comparator_array(Circuit *c, int *A_wires, int *B_wires, int width) {
+    int borrow = -1; // -1 represents constant 0
+
+    // Iterate LSB (width-1) to MSB (0)
+    for (int i = width - 1; i >= 0; i--) {
+        int a = A_wires[i];
+        int b = B_wires[i];
+
+        // Optimized Full Subtractor Borrow Logic:
+        // Bout = (~A & B) | (~(A ^ B) & Bin)
+        
+        // Term 1: ~A & B (Borrow generated here)
+        int not_a = circuit_add_gate_alive(c, EVO_NOT, a, 0);
+        int gen = circuit_add_gate_alive(c, EVO_AND, not_a, b);
+
+        if (borrow == -1) {
+            // First bit (LSB), no incoming borrow
+            borrow = gen;
+        } else {
+            // Term 2: Propagate borrow if A == B (XNOR) -> ~(A^B)
+            // Note: ~(A^B) is XNOR.
+            int xnor_ab = circuit_add_gate_alive(c, EVO_XNOR, a, b);
+            int prop = circuit_add_gate_alive(c, EVO_AND, xnor_ab, borrow);
+            borrow = circuit_add_gate_alive(c, EVO_OR, gen, prop);
+        }
+    }
+
+    // If Borrow is 1, then A < B.
+    // We want A >= B, so return NOT Borrow.
+    return circuit_add_gate_alive(c, EVO_NOT, borrow, 0);
+}
+
+void build_smart_corrector(Circuit *c) {
+    /* Inputs 0-7: Divisor (D)
+       Inputs 8-15: Remainder (R) */
+    
+    int D[8], R[8];
+    for(int i=0; i<8; i++) D[i] = i;      // D inputs
+    for(int i=0; i<8; i++) R[i] = i + 8;  // R inputs
+    
+    int zero_const = circuit_add_gate_alive(c, EVO_XOR, 0, 0); // Constant 0
+
+    /* 1. Compare R >= D (8-bit) */
+    int is_ge_D = build_ge_comparator_array(c, R, D, 8);
+
+    /* 2. Compare R >= 2*D (9-bit comparison)
+       R is zero-extended: {0, R0...R7}
+       2*D is D shifted:   {D0...D7, 0}
+    */
+    int R_ext[9], D_shf[9];
+    
+    R_ext[0] = zero_const; // MSB extension for R
+    for(int i=0; i<8; i++) R_ext[i+1] = R[i];
+
+    for(int i=0; i<8; i++) D_shf[i] = D[i];
+    D_shf[8] = zero_const; // LSB 0 shift for D
+
+    int is_ge_2D = build_ge_comparator_array(c, R_ext, D_shf, 9);
+
+    /* 3. Handle Divisor == 0 Edge Case 
+       The python script sets correction to 0 if D=0.
+       If D=0, our hardware comparators will say R >= 0 and R >= 0 (TRUE).
+       This would result in Correction=2. We must force 0.
+    */
+    int d_is_nonzero = D[0];
+    for(int i=1; i<8; i++) d_is_nonzero = circuit_add_gate_alive(c, EVO_OR, d_is_nonzero, D[i]);
+
+    /* 4. Logic Synthesis
+       Case R >= 2D:   Output 2 (Binary 10)
+       Case R >= D:    Output 1 (Binary 01)
+       Else:           Output 0 (Binary 00)
+       
+       Let G2 = (R >= 2D)
+       Let G1 = (R >= D)
+       Note: G2 implies G1 (if R >= 2D, R is definitely >= D)
+
+       MSB (Out 0) = G2
+       LSB (Out 1) = G1 AND (NOT G2) -> Simplifies to G1 XOR G2 
+                     (since G2=1 G1=0 is impossible)
+       
+       Apply Enable (d_is_nonzero) to both.
+    */
+
+    int out_msb_raw = is_ge_2D;
+    int out_lsb_raw = circuit_add_gate_alive(c, EVO_XOR, is_ge_D, is_ge_2D);
+
+    c->output_map[0] = circuit_add_gate_alive(c, EVO_AND, out_msb_raw, d_is_nonzero);
+    c->output_map[1] = circuit_add_gate_alive(c, EVO_AND, out_lsb_raw, d_is_nonzero);
+}
+
 /* ============================================================
  * UPDATED try_structural_synthesis WITH ALL NEW DETECTORS
  * ============================================================ */
@@ -8301,6 +8606,27 @@ bool try_structural_synthesis(TT **outputs, Circuit *c) {
     c->dead_count = 0;
     
     
+    
+    if (detect_smart_corrector(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected SMART CORRECTOR (Division Logic)!\n");
+        build_smart_corrector(c);
+        return true;
+    }
+    
+    
+    
+    /* === CUSTOM COMPARATOR & ADDER === */
+    if (detect_ge_comparator(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected GREATER-EQUAL COMPARATOR (A >= B)!\n");
+        build_ge_comparator(c, num_inputs / 2);
+        return true;
+    }
+
+    if (detect_conditional_adder(outputs, num_inputs, num_outputs)) {
+        printf("[*] Detected CONDITIONAL ADDER (Incrementer)!\n");
+        build_conditional_adder(c, num_inputs);
+        return true;
+    }
 	    
     /* === TIER -1: GENERALIZED PROFESSIONAL ALU === */
     if (detect_prof_alu_gen(outputs, num_inputs, num_outputs)) {
